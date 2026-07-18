@@ -39,7 +39,7 @@ export async function POST(request: Request) {
     }
 
     // Exchange the signature for a Bento session (managed account + JWT).
-    // Best-effort: the phone->wallet mapping is always stored so the demo can
+    // Best-effort: the plaintext phone->wallet mapping is always stored so the demo can
     // proceed even if Bento auth is unavailable.
     let bentoLinked = false;
     try {
