@@ -22,6 +22,221 @@ function getBentoSdk(bearer?: string) {
   });
 }
 
+/**
+ * Decimals used to scale whole play credits into on-chain collateral "wei".
+ * Credits markets settle in a USDC-style token (6 decimals by default);
+ * override with BENTO_CREDITS_DECIMALS if the deployment differs.
+ */
+export const CREDITS_DECIMALS = Number(process.env.BENTO_CREDITS_DECIMALS ?? 6);
+
+/** Convert a whole-credit stake into the collateral base-unit string the API expects. */
+export function creditsToWei(stakeCredits: number): string {
+  if (!Number.isFinite(stakeCredits) || stakeCredits <= 0) {
+    throw new Error("Stake must be a positive number of credits.");
+  }
+  const whole = Math.floor(stakeCredits);
+  return (BigInt(whole) * BigInt(10) ** BigInt(CREDITS_DECIMALS)).toString();
+}
+
+export type MarketOption = { index: 0 | 1; label: string };
+
+export type MarketSummaryView = {
+  duelId: string;
+  question: string;
+  options: MarketOption[];
+  collateralMode: string;
+  category?: string;
+  /** Seconds until the market closes (backend-provided). */
+  endsIn?: number;
+};
+
+function toOptions(options: string[] | undefined): MarketOption[] {
+  const labels = options ?? [];
+  return [
+    { index: 0 as const, label: labels[0] ?? "Option A" },
+    { index: 1 as const, label: labels[1] ?? "Option B" },
+  ];
+}
+
+/** List live, credits-collateral markets. Public read — no session needed. */
+export async function listMarkets(params: { query?: string; limit?: number } = {}): Promise<MarketSummaryView[]> {
+  const sdk = getBentoSdk();
+  const limit = Math.min(Math.max(params.limit ?? 3, 1), 20);
+  const resp = await sdk.public.listMarkets({
+    collateralStack: "credits",
+    status: "open",
+    limit,
+    sortBy: "endTime",
+    sortOrder: "asc",
+  });
+
+  let rows = resp.data ?? [];
+  if (params.query) {
+    const needle = params.query.toLowerCase();
+    rows = rows.filter((row) => row.betString?.toLowerCase().includes(needle));
+  }
+
+  return rows.slice(0, limit).map((row) => ({
+    duelId: row.duelId,
+    question: row.betString,
+    options: toOptions(row.options),
+    collateralMode: row.collateralMode ?? "credits",
+    category: row.category,
+    endsIn: row.endsIn,
+  }));
+}
+
+export type MarketDetailView = MarketSummaryView & {
+  duelType: string;
+  status: number;
+  uniqueParticipants?: number;
+};
+
+/** Full detail for one market by duelId. Public read — no session needed. */
+export async function getMarket(duelId: string): Promise<MarketDetailView | null> {
+  const sdk = getBentoSdk();
+  const detail = await sdk.public.getMarketById({ marketId: duelId });
+  if (!detail) return null;
+  return {
+    duelId: detail.duelId,
+    question: detail.betString,
+    options: toOptions(detail.options),
+    collateralMode: detail.collateralMode ?? "credits",
+    category: detail.category,
+    endsIn: detail.endsIn,
+    duelType: detail.duelType,
+    status: detail.status,
+    uniqueParticipants: detail.uniqueParticipants,
+  };
+}
+
+/** The pieces of a priced quote needed to place the bet later. */
+export type BetQuote = {
+  duelId: string;
+  duelType: string;
+  optionIndex: 0 | 1;
+  optionLabel: string;
+  stakeCredits: number;
+  betAmountUsdc: string;
+  slippageBps: number;
+  collateralMode: "credits";
+  sharesOut: number;
+  minSharesOut: number;
+  quoteId: string;
+  quoteTimestamp: number;
+  avgPricePaid: number;
+};
+
+const DEFAULT_SLIPPAGE_BPS = 300; // 3% — tolerant enough for thin credits pools.
+
+/**
+ * Price a buy against a market on behalf of the session user. Requires the
+ * user's Bento bearer (the managed account transacts, not the user's EOA).
+ */
+export async function estimateBet(params: {
+  market: MarketDetailView;
+  optionIndex: 0 | 1;
+  stakeCredits: number;
+  bearer: string;
+  slippageBps?: number;
+}): Promise<BetQuote> {
+  const { market, optionIndex, stakeCredits, bearer } = params;
+  const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+  const betAmountUsdc = creditsToWei(stakeCredits);
+
+  const sdk = getBentoSdk(bearer);
+  const resp = await sdk.user.estimateBuy({
+    duelId: market.duelId,
+    optionIndex,
+    betAmountUsdc,
+    slippageBps,
+  });
+  if (resp.success === false) {
+    throw new Error(resp.error || "The market could not price this stake.");
+  }
+
+  const estimate = resp.estimate;
+  return {
+    duelId: market.duelId,
+    duelType: market.duelType,
+    optionIndex,
+    optionLabel: market.options[optionIndex].label,
+    stakeCredits: Math.floor(stakeCredits),
+    betAmountUsdc,
+    slippageBps,
+    collateralMode: "credits",
+    sharesOut: estimate.shares_out,
+    minSharesOut: estimate.min_shares_out,
+    quoteId: estimate.quote_id,
+    quoteTimestamp: estimate.quote_timestamp,
+    avgPricePaid: estimate.avg_price_paid,
+  };
+}
+
+export type PlacedBet = {
+  accepted: boolean;
+  requestId: string;
+  sharesOut: number;
+  stakeCredits: number;
+  optionLabel: string;
+};
+
+/**
+ * Place a previously priced bet from the user's managed account. Rebuilds the
+ * full estimate the SDK helper expects from the stored quote.
+ */
+export async function placeBetFromQuote(params: { quote: BetQuote; bearer: string }): Promise<PlacedBet> {
+  const { quote, bearer } = params;
+  const sdk = getBentoSdk(bearer);
+
+  const result = await sdk.user.placeBetFromEstimate({
+    // Reconstruct the PricingEngineEstimate fields the builder reads back.
+    estimate: {
+      outcome: quote.optionIndex === 0 ? "yes" : "no",
+      shares_out: quote.sharesOut,
+      min_shares_out: quote.minSharesOut,
+      avg_price_paid: quote.avgPricePaid,
+      current_yes_price: 0,
+      current_no_price: 0,
+      new_yes_price: 0,
+      new_no_price: 0,
+      price_impact: 0,
+      quote_id: quote.quoteId,
+      quote_timestamp: quote.quoteTimestamp,
+    },
+    duelId: quote.duelId,
+    optionIndex: quote.optionIndex,
+    bet: quote.optionLabel,
+    duelType: quote.duelType,
+    betAmount: quote.betAmountUsdc,
+    betAmountUsdc: quote.betAmountUsdc,
+    slippageBps: quote.slippageBps,
+    collateralMode: quote.collateralMode,
+    tokenDecimals: CREDITS_DECIMALS,
+  });
+
+  return {
+    accepted: result.kind === "accepted",
+    requestId: result.requestId,
+    sharesOut: quote.sharesOut,
+    stakeCredits: quote.stakeCredits,
+    optionLabel: quote.optionLabel,
+  };
+}
+
+export type UserShares = { option0: number; option1: number };
+
+/** Read the user's share balance in a specific market. */
+export async function getUserShares(params: {
+  duelId: string;
+  managedAddress: string;
+  bearer: string;
+}): Promise<UserShares> {
+  const sdk = getBentoSdk(params.bearer);
+  const resp = await sdk.user.getUserShares({ duelId: params.duelId, address: params.managedAddress });
+  return { option0: resp.shares?.option0 ?? 0, option1: resp.shares?.option1 ?? 0 };
+}
+
 /** Faucet amount the Bento testnet auto-mint grants per call. */
 export const FAUCET_CREDITS = 1000;
 
@@ -48,7 +263,6 @@ export async function mintTestnetFunds(managedAddress: string, bearer?: string):
         creditsMinted: parsed ? Number(parsed[1]) : FAUCET_CREDITS,
       };
     }
-    // eslint-disable-next-line no-await-in-loop
     await new Promise((res) => setTimeout(res, 1500));
   }
   return { success: false, creditsMinted: 0 };

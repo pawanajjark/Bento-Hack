@@ -1,11 +1,10 @@
 import { ChatOpenAI } from "@langchain/openai";
-import { tools } from "./tools";
+import { createTools, type AgentContext } from "./tools";
 import { SYSTEM_PROMPT } from "./systemPrompt";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { BaseMessage } from "@langchain/core/messages";
-import { MemorySaver } from "@langchain/langgraph";
 
-export function createAgent() {
+export function createAgent(ctx: AgentContext = {}) {
   const llm = new ChatOpenAI({
     modelName: "gpt-4o-mini",
     temperature: 0.2, // Low temperature for more deterministic, reliable outputs
@@ -13,7 +12,7 @@ export function createAgent() {
 
   const agentExecutor = createReactAgent({
     llm,
-    tools,
+    tools: createTools(ctx),
     messageModifier: SYSTEM_PROMPT,
   });
 
@@ -22,10 +21,11 @@ export function createAgent() {
 
 export async function runAgentStep(
   input: string,
-  chatHistory: BaseMessage[] = []
+  chatHistory: BaseMessage[] = [],
+  ctx: AgentContext = {}
 ) {
-  const agentExecutor = createAgent();
-  
+  const agentExecutor = createAgent(ctx);
+
   // For standard executor, we can just invoke it:
   const result = await agentExecutor.invoke({
     messages: [

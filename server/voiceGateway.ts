@@ -4,7 +4,26 @@ import * as http from "http";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import { runAgentStep } from "../lib/agent/agent";
+import type { AgentContext } from "../lib/agent/tools";
+import { toIndianE164 } from "../lib/twilio-verify";
+import { getUserByPhone } from "../lib/user-links";
+import { decryptToken } from "../lib/secure";
 import { BaseMessage, HumanMessage, AIMessage } from "@langchain/core/messages";
+
+/** Resolve the caller's phone into the Bento session the agent acts with. */
+async function resolveCaller(from: unknown): Promise<AgentContext> {
+  const phone = toIndianE164(from);
+  if (!phone) return {};
+  try {
+    const user = await getUserByPhone(phone);
+    if (!user?.managedAddress) return { phone };
+    const bearer = user.bentoTokenEncrypted ? decryptToken(user.bentoTokenEncrypted) : undefined;
+    return { phone, managedAddress: user.managedAddress, bearer };
+  } catch (error) {
+    console.error("Failed to resolve caller session:", error);
+    return { phone };
+  }
+}
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -40,13 +59,22 @@ wss.on("connection", (ws: WebSocket) => {
   
   // Keep track of the chat history for this specific call session
   const chatHistory: BaseMessage[] = [];
+  // Caller identity, resolved from the Twilio setup event. Until then the agent
+  // runs unauthenticated (public reads only).
+  let callerCtx: AgentContext = {};
 
   ws.on("message", async (message: string) => {
     try {
       const data = JSON.parse(message);
-      
+
       if (data.type === "setup") {
-        console.log("Session setup:", data.callSid);
+        console.log("Session setup:", data.callSid, "from:", data.from);
+        callerCtx = await resolveCaller(data.from);
+        console.log(
+          callerCtx.bearer
+            ? `Caller linked as ${callerCtx.phone} (managed ${callerCtx.managedAddress}).`
+            : `Caller ${callerCtx.phone ?? "unknown"} is not linked; read-only session.`,
+        );
       }
       
       // Twilio sends a 'prompt' event when the user speaks
@@ -58,7 +86,7 @@ wss.on("connection", (ws: WebSocket) => {
         
         // Pass to Langchain Agent
         try {
-          const aiResponse = await runAgentStep(userText, chatHistory);
+          const aiResponse = await runAgentStep(userText, chatHistory, callerCtx);
           console.log("Agent:", aiResponse);
           
           // Store in history

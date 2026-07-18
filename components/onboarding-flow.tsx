@@ -422,12 +422,47 @@ function ReadyStep({
   );
 }
 
+const SESSION_KEY = "bento.session";
+
+type StoredSession = { phone: string; walletAddress: string };
+
+function readSession(): StoredSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredSession>;
+    if (parsed && parsed.phone && parsed.walletAddress) {
+      return { phone: parsed.phone, walletAddress: parsed.walletAddress };
+    }
+  } catch {
+    // Corrupt or unavailable storage — treat as no session.
+  }
+  return null;
+}
+
 export function OnboardingFlow() {
   const [step, setStep] = useState<Step>("phone");
   const [phone, setPhone] = useState("");
   const [walletAddress, setWalletAddress] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [phoneError, setPhoneError] = useState("");
+  const [hydrated, setHydrated] = useState(false);
+
+  // Restore a previously linked session so a refresh doesn't restart onboarding.
+  // localStorage is client-only, so this must run after mount (not in a useState
+  // initializer, which would diverge from the SSR render and break hydration).
+  useEffect(() => {
+    const session = readSession();
+    if (session) {
+      /* eslint-disable react-hooks/set-state-in-effect -- one-time hydration from localStorage */
+      setPhone(session.phone);
+      setWalletAddress(session.walletAddress);
+      setStep("ready");
+      /* eslint-enable react-hooks/set-state-in-effect */
+    }
+    setHydrated(true);
+  }, []);
 
   async function submitPhone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -464,10 +499,23 @@ export function OnboardingFlow() {
   }
 
   function restart() {
+    try {
+      window.localStorage.removeItem(SESSION_KEY);
+    } catch {
+      // Ignore storage errors — state reset below is what matters.
+    }
     setPhone("");
     setWalletAddress("");
     setPhoneError("");
     setStep("phone");
+  }
+
+  if (!hydrated) {
+    return (
+      <section className="onboarding-panel" aria-live="polite" aria-busy="true">
+        <StepProgress currentStep="phone" />
+      </section>
+    );
   }
 
   return (
@@ -496,6 +544,14 @@ export function OnboardingFlow() {
           onReady={(address) => {
             setWalletAddress(address);
             setStep("ready");
+            try {
+              window.localStorage.setItem(
+                SESSION_KEY,
+                JSON.stringify({ phone, walletAddress: address }),
+              );
+            } catch {
+              // Non-fatal: session just won't survive a refresh.
+            }
           }}
         />
       ) : null}

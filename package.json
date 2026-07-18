@@ -13,6 +13,7 @@
   "dependencies": {
     "@bento.fun/sdk": "^0.6.1",
     "@langchain/core": "^1.2.3",
+    "@langchain/langgraph": "^1.4.8",
     "@langchain/openai": "^1.5.5",
     "dotenv": "^17.4.2",
     "duck-duck-scrape": "^2.2.7",
