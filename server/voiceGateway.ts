@@ -16,9 +16,17 @@ async function resolveCaller(from: unknown): Promise<AgentContext> {
   if (!phone) return {};
   try {
     const user = await getUserByPhone(phone);
-    if (!user?.managedAddress) return { phone };
-    const bearer = user.bentoTokenEncrypted ? decryptToken(user.bentoTokenEncrypted) : undefined;
-    return { phone, managedAddress: user.managedAddress, bearer };
+    if (!user) return { phone };
+    const managedAddress = user.managedAddress || user.walletAddress;
+    let bearer: string | undefined;
+    if (user.bentoTokenEncrypted) {
+      try {
+        bearer = decryptToken(user.bentoTokenEncrypted);
+      } catch (err) {
+        console.error("Failed to decrypt token:", err);
+      }
+    }
+    return { phone, managedAddress, bearer };
   } catch (error) {
     console.error("Failed to resolve caller session:", error);
     return { phone };
@@ -38,19 +46,19 @@ app.use(express.json());
 // Twilio incoming call webhook
 app.post("/voice/incoming", (req, res) => {
   const host = req.headers.host;
-  
+
   const response = new twilio.twiml.VoiceResponse();
   const connect = response.connect();
-  
+
   // Use wss:// for production, handle localhost via ngrok properly
   const protocol = host?.includes("localhost") ? "ws" : "wss";
-  
+
   const fromNumber = req.body.From;
-  
+
   const relay = connect.conversationRelay({
     url: `${protocol}://${host}/voice/session`
   });
-  
+
   if (fromNumber) {
     relay.parameter({ name: "fromNumber", value: fromNumber });
   }
@@ -62,7 +70,7 @@ app.post("/voice/incoming", (req, res) => {
 // WebSocket handler for ConversationRelay
 wss.on("connection", (ws: WebSocket) => {
   console.log("Twilio connected to ConversationRelay WebSocket");
-  
+
   // Keep track of the chat history for this specific call session
   const chatHistory: BaseMessage[] = [];
   // Caller identity, resolved from the Twilio setup event. Until then the agent
@@ -75,9 +83,9 @@ wss.on("connection", (ws: WebSocket) => {
 
       if (data.type === "setup") {
         console.log("Session setup:", data.callSid);
-        
+
         const fromNumber = data.customParameters?.fromNumber || data.from;
-        
+
         if (fromNumber) {
           console.log("Caller number:", fromNumber);
           callerCtx = await resolveCaller(fromNumber);
@@ -101,15 +109,15 @@ wss.on("connection", (ws: WebSocket) => {
             console.error("Error fetching user from DB:", dbError);
           }
         }
-        
+
         // Trigger initial greeting
         try {
           const initPrompt = "The user has just connected to the call. Give a super casual, high-energy welcome introducing yourself as Ben, the Bento Bookie. Say something like 'What's up man!' or 'Hey, you've got Ben here!'. Ask what event or market they're looking at today. Keep it to one short sentence. Do not wait for a tool call.";
           const aiResponse = await runAgentStep(initPrompt, chatHistory, callerCtx);
           console.log("Agent (Greeting):", aiResponse);
-          
+
           chatHistory.push(new AIMessage(aiResponse as string));
-          
+
           ws.send(JSON.stringify({
             type: "text",
             token: aiResponse,
@@ -119,23 +127,23 @@ wss.on("connection", (ws: WebSocket) => {
           console.error("Agent Greeting Error:", error);
         }
       }
-      
+
       // Twilio sends a 'prompt' event when the user speaks
       if (data.type === "prompt") {
         const userText = data.voicePrompt;
         console.log("Caller:", userText);
-        
+
         if (!userText) return;
-        
+
         // Pass to Langchain Agent
         try {
           const aiResponse = await runAgentStep(userText, chatHistory, callerCtx);
           console.log("Agent:", aiResponse);
-          
+
           // Store in history
           chatHistory.push(new HumanMessage(userText));
           chatHistory.push(new AIMessage(aiResponse as string));
-          
+
           // Send response back to Twilio to speak
           ws.send(JSON.stringify({
             type: "text",
@@ -156,7 +164,7 @@ wss.on("connection", (ws: WebSocket) => {
         console.log("User interrupted the agent.");
         // We can handle interruption logic here (e.g. stopping TTS)
       }
-      
+
     } catch (err) {
       console.error("Error parsing message from Twilio:", err);
     }
