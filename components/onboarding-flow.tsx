@@ -65,11 +65,13 @@ function PhoneStep({
   setPhone,
   onSubmit,
   isBusy,
+  error,
 }: {
   phone: string;
   setPhone: (phone: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   isBusy: boolean;
+  error: string;
 }) {
   return (
     <form onSubmit={onSubmit} className="step-content">
@@ -99,8 +101,10 @@ function PhoneStep({
         />
       </div>
 
+      {error ? <p className="error-message" role="alert">{error}</p> : null}
+
       <button className="primary-button" type="submit" disabled={phone.length !== 10 || isBusy}>
-        <span>{isBusy ? "Sending code" : "Send verification code"}</span>
+        <span>{isBusy ? "Calling you" : "Call me with a code"}</span>
         {isBusy ? (
           <LoaderCircle className="spin" size={21} aria-hidden="true" />
         ) : (
@@ -110,7 +114,7 @@ function PhoneStep({
 
       <p className="consent-copy">
         <LockKeyhole size={18} aria-hidden="true" />
-        By continuing, you agree to receive a one-time verification message.
+        By continuing, you agree to receive an automated one-time verification call.
       </p>
     </form>
   );
@@ -127,10 +131,14 @@ function CodeStep({
 }) {
   const [digits, setDigits] = useState(["", "", "", "", "", ""]);
   const [isBusy, setIsBusy] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const refs = useRef<Array<HTMLInputElement | null>>([]);
 
   function updateDigit(index: number, value: string) {
     const digit = value.replace(/\D/g, "").slice(-1);
+    setError("");
     setDigits((current) => current.map((item, itemIndex) => (itemIndex === index ? digit : item)));
     if (digit && index < refs.current.length - 1) refs.current[index + 1]?.focus();
   }
@@ -143,8 +151,44 @@ function CodeStep({
     event.preventDefault();
     if (digits.some((digit) => !digit)) return;
     setIsBusy(true);
-    await wait(650);
-    onVerified();
+    setError("");
+
+    try {
+      const response = await fetch("/api/verify/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, code: digits.join("") }),
+      });
+      const result = await response.json();
+
+      if (!response.ok) throw new Error(result.error ?? "The code could not be verified.");
+      onVerified();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The code could not be verified.");
+      setIsBusy(false);
+    }
+  }
+
+  async function resendCode() {
+    setIsResending(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const response = await fetch("/api/verify/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const result = await response.json();
+
+      if (!response.ok) throw new Error(result.error ?? "We could not place another call.");
+      setNotice("A new verification call is on its way.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "We could not place another call.");
+    } finally {
+      setIsResending(false);
+    }
   }
 
   return (
@@ -154,7 +198,7 @@ function CodeStep({
       </button>
       <div className="step-heading">
         <h2>Enter your code</h2>
-        <p>We sent a six-digit code to +91 {phone.slice(0, 5)} {phone.slice(5)}.</p>
+        <p>Answer the call to +91 {phone.slice(0, 5)} {phone.slice(5)} and enter the six-digit code read aloud.</p>
       </div>
 
       <div className="otp-row" aria-label="Six-digit verification code">
@@ -175,13 +219,19 @@ function CodeStep({
         ))}
       </div>
 
+      {error ? <p className="error-message" role="alert">{error}</p> : null}
+      {notice ? <p className="inline-note" role="status">{notice}</p> : null}
+
       <button className="primary-button" type="submit" disabled={digits.some((digit) => !digit) || isBusy}>
         <span>{isBusy ? "Verifying" : "Verify phone"}</span>
         {isBusy ? <LoaderCircle className="spin" size={21} /> : <ArrowRight size={21} />}
       </button>
 
       <p className="inline-note">
-        Didn&apos;t receive it? <button type="button">Send again</button>
+        Didn&apos;t get the call?{" "}
+        <button type="button" onClick={resendCode} disabled={isResending}>
+          {isResending ? "Calling again…" : "Call again"}
+        </button>
       </p>
     </form>
   );
@@ -318,19 +368,35 @@ export function OnboardingFlow() {
   const [phone, setPhone] = useState("");
   const [walletAddress, setWalletAddress] = useState("");
   const [isBusy, setIsBusy] = useState(false);
+  const [phoneError, setPhoneError] = useState("");
 
   async function submitPhone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (phone.length !== 10) return;
     setIsBusy(true);
-    await wait(650);
-    setIsBusy(false);
-    setStep("code");
+    setPhoneError("");
+
+    try {
+      const response = await fetch("/api/verify/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const result = await response.json();
+
+      if (!response.ok) throw new Error(result.error ?? "We could not place the verification call.");
+      setStep("code");
+    } catch (reason) {
+      setPhoneError(reason instanceof Error ? reason.message : "We could not place the verification call.");
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   function restart() {
     setPhone("");
     setWalletAddress("");
+    setPhoneError("");
     setStep("phone");
   }
 
@@ -339,7 +405,16 @@ export function OnboardingFlow() {
       <StepProgress currentStep={step} />
 
       {step === "phone" ? (
-        <PhoneStep phone={phone} setPhone={setPhone} onSubmit={submitPhone} isBusy={isBusy} />
+        <PhoneStep
+          phone={phone}
+          setPhone={(value) => {
+            setPhone(value);
+            setPhoneError("");
+          }}
+          onSubmit={submitPhone}
+          isBusy={isBusy}
+          error={phoneError}
+        />
       ) : null}
       {step === "code" ? (
         <CodeStep phone={phone} onBack={() => setStep("phone")} onVerified={() => setStep("wallet")} />

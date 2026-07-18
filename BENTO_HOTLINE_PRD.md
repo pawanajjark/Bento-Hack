@@ -98,7 +98,7 @@ A team member with a pre-linked Bento test account who demonstrates the complete
 ### 7.1 One-time onboarding
 
 1. User opens the Bento Hotline onboarding page from an SMS or QR code.
-2. User enters and verifies their phone number.
+2. User enters their phone number and receives an automated Twilio Verify call that reads a six-digit OTP aloud.
 3. User connects a wallet.
 4. The browser asks the wallet to sign the Bento login or registration message.
 5. The backend exchanges the signature for a Bento user JWT.
@@ -431,6 +431,7 @@ Reference documentation:
 ## 15. Twilio integration requirements
 
 - Purchase or configure one Twilio Voice-capable number.
+- Use the Twilio Verify voice channel for onboarding OTP delivery; trial accounts can call only verified destination numbers.
 - Return `<Connect><ConversationRelay>` from the inbound voice webhook.
 - Use a public `wss://` endpoint.
 - Validate `X-Twilio-Signature` for HTTP and WebSocket initiation.
