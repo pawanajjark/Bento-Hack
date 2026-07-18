@@ -7,8 +7,16 @@ export type UserLink = {
   phoneHash: string;
   walletAddress: string;
   managedAddress?: string;
+  bentoTokenEncrypted?: string;
+  tokenExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
+};
+
+export type LinkExtras = {
+  managedAddress?: string;
+  bentoTokenEncrypted?: string;
+  tokenExpiresAt?: Date;
 };
 
 // Phone numbers are stored only as a salted hash, never in plaintext.
@@ -21,7 +29,7 @@ function hashPhone(e164: string): string {
 export async function linkWallet(
   e164Phone: string,
   walletAddress: string,
-  managedAddress?: string,
+  extras: LinkExtras = {},
 ): Promise<string> {
   const db = await getDb();
   const phoneHash = hashPhone(e164Phone);
@@ -32,7 +40,9 @@ export async function linkWallet(
     {
       $set: {
         walletAddress: walletAddress.toLowerCase(),
-        ...(managedAddress ? { managedAddress: managedAddress.toLowerCase() } : {}),
+        ...(extras.managedAddress ? { managedAddress: extras.managedAddress.toLowerCase() } : {}),
+        ...(extras.bentoTokenEncrypted ? { bentoTokenEncrypted: extras.bentoTokenEncrypted } : {}),
+        ...(extras.tokenExpiresAt ? { tokenExpiresAt: extras.tokenExpiresAt } : {}),
         updatedAt: now,
       },
       $setOnInsert: { phoneHash, createdAt: now },

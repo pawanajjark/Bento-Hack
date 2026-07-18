@@ -260,7 +260,8 @@ function WalletStep({
       if (!address) throw new Error("The wallet did not return an account.");
 
       const timestamp = String(Date.now());
-      const message = `Bento.fun Login\n Timestamp: ${timestamp}\n Wallet: ${address}`;
+      // Must match Bento's EoaLoginDto message exactly (no extra spaces).
+      const message = `Bento.fun Login\nTimestamp: ${timestamp}\nWallet: ${address}`;
       const signature = (await window.ethereum.request({
         method: "personal_sign",
         params: [message, address],
@@ -269,7 +270,7 @@ function WalletStep({
       const response = await fetch("/api/auth/link", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, address, message, signature }),
+        body: JSON.stringify({ phone, address, timestamp, signature }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "We couldn't link your wallet.");
