@@ -31,9 +31,6 @@ const stepOrder: Record<Step, number> = {
   ready: 2,
 };
 
-const wait = (duration: number) =>
-  new Promise<void>((resolve) => window.setTimeout(resolve, duration));
-
 function StepProgress({ currentStep }: { currentStep: Step }) {
   const activeIndex = stepOrder[currentStep];
 
@@ -264,12 +261,19 @@ function WalletStep({
 
       const timestamp = String(Date.now());
       const message = `Bento.fun Login\n Timestamp: ${timestamp}\n Wallet: ${address}`;
-      await window.ethereum.request({
+      const signature = (await window.ethereum.request({
         method: "personal_sign",
         params: [message, address],
-      });
+      })) as string;
 
-      await wait(400);
+      const response = await fetch("/api/auth/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, address, message, signature }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "We couldn't link your wallet.");
+
       onReady(address);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Wallet connection was cancelled.";
