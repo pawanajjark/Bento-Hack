@@ -228,9 +228,8 @@ export async function placeBetFromQuote(params: { quote: BetQuote; bearer: strin
   console.log("[DEBUG] placeBetFromQuote invoking SDK with payload:", JSON.stringify(payload, null, 2));
 
   try {
-    // MOCK UP: Bypass the actual SDK call to avoid placing bets on-chain during testing.
-    console.log("[DEBUG] placeBetFromQuote MOCKED SUCCESS - skipping onchain call for testing");
-    const result = { kind: "accepted", requestId: `mock-${Date.now()}` };
+    const result = await sdk.user.placeBetFromEstimate(payload as any);
+    console.log("[DEBUG] placeBetFromQuote SDK result:", JSON.stringify(result, null, 2));
 
     return {
       accepted: result.kind === "accepted",
