@@ -145,7 +145,7 @@ export async function listAllDuels(): Promise<DuelSummaryView[]> {
     const rows: PublicDuelSummary[] = [];
 
     for (let page = 1; ; page += 1) {
-      const response = await sdk.public.listMarkets({ ...request, page, limit: pageSize });
+      const response = await sdk.public.listDuels({ ...request, page, limit: pageSize });
       const batch = response.data ?? [];
       rows.push(...batch);
 
