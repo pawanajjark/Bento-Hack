@@ -13,6 +13,12 @@ export async function POST(request: Request) {
       return Response.json({ error: "Enter the six-digit code from the call." }, { status: 400 });
     }
 
+    // Demo bypass: skip the real code check when a configured bypass code is entered.
+    const bypass = process.env.OTP_BYPASS_CODE;
+    if (bypass && code === bypass) {
+      return Response.json({ ok: true });
+    }
+
     const result = checkCode(to, code);
 
     if (result === "approved") {

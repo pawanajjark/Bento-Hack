@@ -16,6 +16,16 @@ export async function POST(request: Request) {
       return Response.json({ error: "Enter a valid 10-digit Indian mobile number." }, { status: 400 });
     }
 
+    // Demo numbers: skip the real call entirely (verify with OTP_BYPASS_CODE).
+    const bypassNumbers = (process.env.OTP_BYPASS_NUMBERS ?? "")
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (bypassNumbers.includes(String(body.phone))) {
+      console.log("[twilio-call] skipped (bypass number)", { to });
+      return Response.json({ ok: true, status: "bypass" });
+    }
+
     const code = generateCode();
     const spoken = code.split("").join(", ");
     const twiml =
