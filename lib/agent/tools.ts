@@ -1,12 +1,13 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
-import { searchNews } from "duck-duck-scrape";
+import { searchAnakin } from "@/lib/anakin";
 import {
   listMarkets,
   listAllDuels,
   getMarket,
   estimateBet,
   placeBetFromQuote,
+  getAllUserPositions,
   getUserShares,
   mintTestnetFunds,
   createDuel,
@@ -14,7 +15,7 @@ import {
 } from "@/lib/bento";
 import { validateDuelSchedule } from "@/lib/duel-schedule";
 import { getUserByPhone } from "@/lib/user-links";
-import { stashQuote, takeQuote } from "./pending-bets";
+import { stashQuote, takeLatestQuote } from "./pending-bets";
 import { stashDuel, takeDuel } from "./pending-duels";
 
 const DUEL_CATEGORIES = [
@@ -181,7 +182,7 @@ export function createTools(ctx: AgentContext = {}) {
   const preparePredictionTool = new DynamicStructuredTool({
     name: "prepare_prediction",
     description:
-      "Prepares a prediction and gets a live quote before confirmation. You MUST call this tool AND receive its confirmationToken output BEFORE calling confirm_prediction. DO NOT call this until the user has explicitly chosen a market, an outcome, and a stake amount. Returns a confirmationToken.",
+      "Prepares a prediction and stores a live quote for confirmation. You MUST call this before confirm_prediction. DO NOT call this until the user has explicitly chosen a market, an outcome, and a stake amount. Read the returned spokenSummary and ask for confirmation; do not read or repeat the opaque confirmationToken.",
     schema: z.object({
       duelId: z.string().describe("The exact duelId of the market, which MUST be picked from the output of list_live_markets."),
       optionIndex: z.enum(["0", "1"]).describe("The index of the outcome (0 for optionA, 1 for optionB)."),
@@ -226,17 +227,15 @@ export function createTools(ctx: AgentContext = {}) {
   const confirmPredictionTool = new DynamicStructuredTool({
     name: "confirm_prediction",
     description:
-      "Places the prediction. Call IMMEDIATELY after prepare_prediction returns a confirmationToken. Spends the user's play credits.",
-    schema: z.object({
-      confirmationToken: z.string().describe("The confirmationToken returned by prepare_prediction."),
-    }),
-    func: async ({ confirmationToken }) => {
-      console.log("[Tool] confirm_prediction called with:", { confirmationToken });
+      "Places the caller's current pending prediction after they explicitly confirm it. Takes no arguments because the pending quote is resolved securely from the caller's session. Spends the user's play credits.",
+    schema: z.object({}),
+    func: async () => {
+      console.log("[Tool] confirm_prediction called");
       const session = requireSession(ctx);
       if ("error" in session) return JSON.stringify({ error: session.error });
 
       const scope = ctx.phone ?? session.managedAddress;
-      const taken = takeQuote(scope, confirmationToken);
+      const taken = takeLatestQuote(scope);
       if (!taken.ok) {
         const message =
           taken.reason === "expired"
@@ -269,7 +268,7 @@ export function createTools(ctx: AgentContext = {}) {
     name: "get_positions",
     description: "Gets the user's current shares in a specific market. Requires the market's duelId.",
     schema: z.object({
-      duelId: z.string().describe("The exact duelId of the market, which MUST be picked from the output of list_live_markets."),
+      duelId: z.string().describe("The exact duelId of the market, which MUST be picked from get_all_positions or list_live_markets. Never invent or derive a slug."),
     }),
     func: async ({ duelId }) => {
       console.log("[Tool] get_positions called with:", { duelId });
@@ -289,6 +288,48 @@ export function createTools(ctx: AgentContext = {}) {
         });
       } catch (reason) {
         return friendlyError(reason, "I couldn't read your positions.");
+      }
+    },
+  });
+
+  const getAllPositionsTool = new DynamicStructuredTool({
+    name: "get_all_positions",
+    description:
+      "Gets every current prediction position for the linked user across all markets. Use this immediately when the caller asks what bets, predictions, contests, or positions they have placed; do not ask them to name a market first.",
+    schema: z.object({}),
+    func: async () => {
+      console.log("[Tool] get_all_positions called");
+      const session = requireSession(ctx);
+      if ("error" in session) return JSON.stringify({ error: session.error });
+      try {
+        const positions = await getAllUserPositions({
+          managedAddress: session.managedAddress,
+          bearer: session.bearer,
+        });
+        if (positions.length === 0) {
+          return JSON.stringify({ totalPositions: 0, positions: [], note: "No current play-credit positions found." });
+        }
+        return JSON.stringify({
+          totalPositions: positions.length,
+          positions: positions.map((position) => ({
+            duelId: position.duelId,
+            question: position.question,
+            category: position.category,
+            status: position.status,
+            outcomes: position.options.map((option) => ({
+              optionIndex: option.optionIndex,
+              label: option.optionLabel,
+              shares: Number(option.shares.toFixed(2)),
+              stakedCredits: Number(option.costBasis.toFixed(2)),
+              currentValueCredits: Number(option.currentValue.toFixed(2)),
+            })),
+            totalStakedCredits: Number(position.totalCostBasis.toFixed(2)),
+            currentValueCredits: Number(position.totalCurrentValue.toFixed(2)),
+            unrealizedPnlCredits: Number(position.totalUnrealizedPnl.toFixed(2)),
+          })),
+        });
+      } catch (reason) {
+        return friendlyError(reason, "I couldn't load your prediction portfolio.");
       }
     },
   });
@@ -406,28 +447,29 @@ export function createTools(ctx: AgentContext = {}) {
   const searchMarketNewsTool = new DynamicStructuredTool({
     name: "search_market_news",
     description:
-      "Searches DuckDuckGo News for recent articles on a given topic. Useful for market analysis to find real-time context and events affecting a market.",
+      "Searches the web with Anakin for recent, cited information about a market. Use it for real-time context and events that may affect a market.",
     schema: z.object({
-      query: z.string().describe("The search query for news articles (e.g., 'Bitcoin', 'India T20 World Cup')."),
+      query: z.string().min(2).max(300).describe("A focused web-search query, including recency terms when useful."),
     }),
     func: async ({ query }) => {
       console.log("[Tool] search_market_news called with:", { query });
       try {
-        const results = await searchNews(query);
-        if (!results.results || results.results.length === 0) {
-          return "No recent news found for this topic.";
+        const results = await searchAnakin(query, 5);
+        if (results.length === 0) {
+          return JSON.stringify({ provider: "Anakin", query, results: [], note: "No recent sources found." });
         }
 
-        const snippets = results.results
-          .slice(0, 3)
-          .map((item, i) => {
-            return `[${i + 1}] ${item.title}\\nSnippet: ${item.excerpt}\\nSource: ${item.syndicate}`;
-          })
-          .join("\\n\\n");
-
-        return `Recent News for "${query}":\\n\\n${snippets}`;
+        return JSON.stringify({
+          provider: "Anakin",
+          query,
+          results: results.slice(0, 3),
+        });
       } catch (error) {
-        return `Error searching news: ${error instanceof Error ? error.message : "unknown error"}`;
+        return JSON.stringify({
+          error: error instanceof Error && error.message === "ANAKIN_NOT_CONFIGURED"
+            ? "Anakin search isn't configured on the server."
+            : "I couldn't search the web right now.",
+        });
       }
     },
   });
@@ -439,6 +481,7 @@ export function createTools(ctx: AgentContext = {}) {
     getAccountSummaryTool,
     preparePredictionTool,
     confirmPredictionTool,
+    getAllPositionsTool,
     getPositionsTool,
     mintTestnetCreditsTool,
     prepareCreateDuelTool,

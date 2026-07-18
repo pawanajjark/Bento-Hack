@@ -394,6 +394,82 @@ export async function getUserShares(params: {
   return { option0: resp.shares?.option0 ?? 0, option1: resp.shares?.option1 ?? 0 };
 }
 
+export type UserPortfolioOption = {
+  optionIndex: number;
+  optionLabel: string;
+  shares: number;
+  costBasis: number;
+  currentValue: number;
+  unrealizedPnl: number;
+};
+
+export type UserPortfolioPosition = {
+  duelId: string;
+  question: string;
+  category?: string;
+  status?: string | number;
+  options: UserPortfolioOption[];
+  totalCostBasis: number;
+  totalCurrentValue: number;
+  totalUnrealizedPnl: number;
+};
+
+function jsonRecord(value: unknown): Json | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined;
+}
+
+function numericValue(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Lists every current play-credit position for a managed account. This is the
+ * portfolio API, not `duels.getContests`, which is for resolution disputes on
+ * one duel and does not represent bets placed by a user.
+ */
+export async function getAllUserPositions(params: {
+  managedAddress: string;
+  bearer: string;
+}): Promise<UserPortfolioPosition[]> {
+  const sdk = getBentoSdk(params.bearer);
+  const response = await sdk.user.portfolio.getPositions(params.managedAddress, {
+    collateralStack: "credits",
+  });
+  const root = jsonRecord(response);
+  const rows = Array.isArray(root?.positions) ? root.positions : [];
+
+  return rows.flatMap((value): UserPortfolioPosition[] => {
+    const row = jsonRecord(value);
+    if (!row || typeof row.duelId !== "string" || typeof row.question !== "string") return [];
+
+    const rawOptions = Array.isArray(row.options) ? row.options : [];
+    const options = rawOptions.flatMap((optionValue): UserPortfolioOption[] => {
+      const option = jsonRecord(optionValue);
+      if (!option || typeof option.optionLabel !== "string") return [];
+      return [{
+        optionIndex: numericValue(option.optionIndex),
+        optionLabel: option.optionLabel,
+        shares: numericValue(option.shares),
+        costBasis: numericValue(option.costBasis),
+        currentValue: numericValue(option.currentValue),
+        unrealizedPnl: numericValue(option.unrealizedPnL),
+      }];
+    });
+
+    return [{
+      duelId: row.duelId,
+      question: row.question,
+      ...(typeof row.category === "string" ? { category: row.category } : {}),
+      ...(typeof row.status === "string" || typeof row.status === "number" ? { status: row.status } : {}),
+      options,
+      totalCostBasis: numericValue(row.totalCostBasis),
+      totalCurrentValue: numericValue(row.totalCurrentValue),
+      totalUnrealizedPnl: numericValue(row.totalUnrealizedPnL),
+    }];
+  });
+}
+
 /** Faucet amount the Bento testnet auto-mint grants per call. */
 export const FAUCET_CREDITS = 1000;
 

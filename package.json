@@ -16,7 +16,6 @@
     "@langchain/langgraph": "^1.4.8",
     "@langchain/openai": "^1.5.5",
     "dotenv": "^17.4.2",
-    "duck-duck-scrape": "^2.2.7",
     "express": "^5.2.1",
     "langchain": "^1.5.3",
     "lucide-react": "1.24.0",
