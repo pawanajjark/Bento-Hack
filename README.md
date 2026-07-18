@@ -15,7 +15,20 @@ Connect wallet once (web onboarding) → Call the hotline → Discover a live ma
 → Receive an SMS receipt → Ask for the updated position
 ```
 
-The LLM agent handles conversation, intent understanding, and read-only tool selection. The application server owns authentication, amount conversion, quote validation, confirmation, idempotency, and every Bento write.
+The LLM agent handles conversation, intent understanding, and tool selection. The application server owns authentication, amount conversion, quote validation, and idempotency; every Bento write still requires a fresh estimate and an explicit caller confirmation before the agent's confirm tool has anything to act on (see [Safety model](#safety-model)).
+
+The same agent also works from a browser: `/duels` lets anyone browse or create markets without calling in, and `/agent-chat` runs the identical LangGraph agent as a text chat for debugging.
+
+## Agent tools
+
+The voice/chat agent ([`lib/agent/tools.ts`](lib/agent/tools.ts)) only gets narrow, typed tools — never raw Bento SDK access or secrets:
+
+- `list_live_markets`, `list_all_duels`, `get_market_details` — discover and inspect markets/duels.
+- `get_account_summary`, `get_positions`, `get_all_positions` — balance and portfolio reads.
+- `prepare_prediction` → `confirm_prediction` — fresh quote, then a one-time confirm that consumes it.
+- `prepare_create_duel` → `confirm_create_duel` — stage and publish a brand-new public duel by voice.
+- `mint_testnet_credits` — top up play credits from the testnet faucet.
+- `search_market_news` — cited, real-time web context via the Anakin.io Search API ([`lib/anakin.ts`](lib/anakin.ts)).
 
 ## Stack
 
@@ -85,4 +98,6 @@ pnpm voice                   # Twilio ConversationRelay gateway (separate proces
 
 ## Safety model
 
-The LLM never executes a Bento write directly. Every prediction requires a fresh quote and an explicit, scoped confirmation step handled by the server ([`app/api/bets`](app/api/bets)), with idempotency keys to prevent duplicate placement. This MVP uses Bento play credits only — no real-money or on-chain betting.
+Every prediction and every new duel requires a fresh Bento quote/schedule check before it can be confirmed. `confirm_prediction` and `confirm_create_duel` are callable by the model, but they only act on a short-lived, single-use record stashed server-side by the matching `prepare_*` call ([`lib/agent/pending-bets.ts`](lib/agent/pending-bets.ts), [`lib/agent/pending-duels.ts`](lib/agent/pending-duels.ts)) — with no matching pending record, confirm has nothing to do. Placement uses idempotency to prevent duplicate writes. This MVP uses Bento play credits only — no real-money or on-chain betting.
+
+See [`BENTO_HOTLINE_PRD.md`](BENTO_HOTLINE_PRD.md#0-implementation-delta-as-built) for where the shipped build diverged from or extended the original PRD.

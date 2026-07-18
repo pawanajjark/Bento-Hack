@@ -1,11 +1,28 @@
 # Bento Hotline — Voice Prediction Agent PRD
 
-**Status:** Hackathon MVP
+**Status:** Hackathon MVP — implemented, ahead of original P0 scope in several areas
 **Event:** Build on Bento — BLR Edition
 **Working name:** Bento Hotline
 **One-line pitch:** Call a phone number to discover live Bento markets, understand the odds, place free-play predictions, and track results without opening an app.
-**Primary stack:** Twilio ConversationRelay, OpenAI API, Bento TypeScript SDK
+**Primary stack:** Twilio (Programmable Voice + ConversationRelay), LangChain/LangGraph + OpenAI, Bento TypeScript SDK, Next.js, MongoDB, Anakin.io
 **Collateral:** Bento play credits only
+
+## 0. Implementation delta (as built)
+
+This section tracks where the shipped product diverged from or extended the original plan below. Sections further down are kept as the original design record; treat this list as the current source of truth where it conflicts with them.
+
+- **Onboarding OTP is a plain Twilio Voice call, not Twilio Verify.** Twilio Verify's voice channel was silently dropped by an Indian carrier (Jio) with no error surfaced. The app now places a normal outbound call (`TWILIO_CALLER_NUMBER`) with inline TwiML that reads a self-generated 6-digit code, validated by [`lib/otp-store.ts`](lib/otp-store.ts) (in-memory, 5-minute TTL, 5 attempts — replace with Redis before running multi-instance). See §7.1 and §15.
+- **The agent can create duels by voice, not just bet on them.** `prepare_create_duel` / `confirm_create_duel` let a linked caller publish a brand-new public credits duel (question, category, two outcomes, schedule) after explicit confirmation. Not in the original goals list.
+- **A testnet credit faucet is agent-callable.** `mint_testnet_credits` tops up the caller's play-credit balance on request. Originally out of scope for voice.
+- **Live web search is wired into the agent.** `search_market_news`, backed by the Anakin.io Search API (`lib/anakin.ts`), lets the agent pull cited, real-time context for a market. The original PRD had no external-research tool; agent behavior rules (§14) still forbid presenting this as Bento market data.
+- **Confirmation is a directly model-callable tool (`confirm_prediction`/`confirm_create_duel`), not a controller-only `commit_prediction` hidden from the LLM.** Safety instead comes from: the tool requiring a previously prepared, unexpired, single-use quote/duel stashed server-side ([`lib/agent/pending-bets.ts`](lib/agent/pending-bets.ts), [`lib/agent/pending-duels.ts`](lib/agent/pending-duels.ts)), a fresh Bento estimate at prepare-time, and system-prompt rules against calling it without explicit caller confirmation. This is a real deviation from §10/§11 below — flagged here rather than silently rewritten because it changes the trust boundary.
+- **A public web experience shipped alongside the phone hotline:**
+  - `/duels` — public duels board to browse live/upcoming/settled markets and create a duel from the browser (no call required).
+  - `/agent-chat` — text chat console against the same LangGraph agent used on calls, for debugging without dialing in.
+  - `/tester` — a raw dev console that exercises the Bento SDK wrapper directly (login, estimate, place, faucet, create-duel, markets/shares reads) via `app/api/tester/*`.
+- **Agent runtime is LangChain/LangGraph (`createReactAgent`) over the OpenAI API**, not a bespoke OpenAI Responses/Realtime tool loop. `lib/agent/agent.ts` runs the graph per turn; the voice gateway feeds it transcript turns and speaks back the final text.
+- **Bento auth/session details resolved during implementation:** Builder API key is sent via header `x-builder-api-key`; wallet login signs `"Bento.fun Login\nTimestamp: {ts}\nWallet: {address}"`; a new wallet gets `eoaLogin` → `{ exists: false }` → `eoaRegister`; the managed (transacting) account address is `user.address`, distinct from the signing EOA. See §13.
+- **Credits decimals are configurable** (`BENTO_CREDITS_DECIMALS`, default 18, not a fixed assumption) — `creditsToWei` in [`lib/bento.ts`](lib/bento.ts) does the conversion.
 
 ## 1. Executive summary
 
@@ -55,14 +72,18 @@ A phone call is a compelling prediction-market interface when:
 - Send an SMS receipt containing the market, outcome, stake, and status.
 - Let the caller ask for their current balance and open positions.
 - Complete the main flow in under two minutes during judging.
+- **(As built, beyond original scope)** Let a linked caller publish a brand-new public duel by voice, with the same explicit-confirmation gate as a bet (§0, §10).
+- **(As built)** Let a caller top up testnet play credits via the faucet on request.
+- **(As built)** Let a caller pull cited, real-time web context for a market via a bounded search tool.
+- **(As built)** Offer the same market discovery, betting, and duel-creation flows from a public web board (`/duels`), not only by phone.
 
 ### Non-goals for the hackathon
 
 - Real-money or USDC betting.
 - Autonomous betting or recurring instructions such as “bet for me every day.”
 - Personalized gambling advice or claims of guaranteed returns.
-- Open-ended sports research or news analysis.
-- Market creation, resolution, parlays, and tournaments.
+- Open-ended sports research or news analysis — narrowed, not eliminated: `search_market_news` (§10) gives bounded, cited lookups for one query at a time, not general research or news summarization.
+- ~~Market creation~~ resolution, parlays, and tournaments. Market/duel **creation** shipped (§0, §10); resolution, parlays, and tournaments remain out of scope.
 - Outbound promotional calling at scale.
 - Supporting arbitrary wallets without a prior web onboarding step.
 - Production-grade identity verification, custody, or regulatory coverage.
@@ -98,7 +119,7 @@ A team member with a pre-linked Bento test account who demonstrates the complete
 ### 7.1 One-time onboarding
 
 1. User opens the Bento Hotline onboarding page from an SMS or QR code.
-2. User enters their phone number and receives an automated Twilio Verify call that reads a six-digit OTP aloud.
+2. User enters their phone number and receives an automated Twilio Voice call — a plain outbound call from `TWILIO_CALLER_NUMBER`, not Twilio Verify — that reads a self-generated six-digit OTP aloud. (Twilio Verify's voice channel was dropped silently by an Indian carrier during testing; see §0.)
 3. User connects a wallet.
 4. The browser asks the wallet to sign the Bento login or registration message.
 5. The backend exchanges the signature for a Bento user JWT.
@@ -201,13 +222,14 @@ Any change to market, outcome, stake, or quote invalidates the pending confirmat
 
 ### P1 — add after the full P0 loop works
 
-- Balance and open-position queries.
-- Hindi/English language switching where the configured Twilio voices support it.
-- Outbound opt-in alerts for material odds movement.
-- Voice-built multi-leg parlays.
-- Personalized watchlist and favorite sports.
-- A web dashboard with live transcript and tool activity.
-- Call transfer or SMS deep link into the Bento web experience.
+- ~~Balance and open-position queries.~~ **Done** — `get_account_summary`, `get_positions`, `get_all_positions`.
+- Hindi/English language switching where the configured Twilio voices support it. *(not yet built)*
+- Outbound opt-in alerts for material odds movement. *(not yet built)*
+- Voice-built multi-leg parlays. *(not yet built)*
+- Personalized watchlist and favorite sports. *(not yet built)*
+- ~~A web dashboard with live transcript and tool activity.~~ **Partially done** — `/agent-chat` and `/tester` give a text-based agent console and a raw Bento SDK console for debugging, but neither streams a live call transcript from an in-progress phone call.
+- Call transfer or SMS deep link into the Bento web experience. *(not yet built)*
+- **New, not originally listed:** testnet credit faucet (`mint_testnet_credits`), voice-driven duel creation (`prepare_create_duel`/`confirm_create_duel`), web search for market context (`search_market_news`), and a public web duels board (`/duels`) — all shipped; see §0.
 
 ### P2 — post-hackathon
 
@@ -219,32 +241,26 @@ Any change to market, outcome, stake, or quote invalidates the pending confirmat
 
 ## 10. Agent tool contract
 
-The model receives narrow application-owned tools. Raw Bento SDK methods and secrets are never exposed to the model.
+> **As built** ([`lib/agent/tools.ts`](lib/agent/tools.ts)): the model gets a larger, still narrow, application-owned tool set than originally scoped, and the confirmation tools are directly model-callable rather than a hidden controller op — see §0 for why that's still safe. Raw Bento SDK methods and secrets are never exposed to the model; every tool returns typed JSON, never a stack trace, token, or wallet address.
 
 ### `list_live_markets`
 
 ```ts
-type ListLiveMarketsInput = {
-  query?: string;
-  limit: 1 | 2 | 3;
-};
+type ListLiveMarketsInput = { query?: string; limit?: "1".."20" }; // default 10
+```
 
-type VoiceMarket = {
-  duelId: string;
-  question: string;
-  optionA: string;
-  optionB: string;
-  collateralMode: "credits";
-  status: "live";
+Calls Bento public catalog methods, keeps only live credit-based markets, returns `duelId` (never the catalog `id`), `question`, both option labels, `collateralMode`, `category`.
+
+### `list_all_duels`
+
+```ts
+type ListAllDuelsInput = {
+  status?: "bootstrapping" | "open" | "pending" | "pending_contest" | "settled" | "all"; // default "all"
+  limit?: number; // 1-5, default 3
 };
 ```
 
-Server behavior:
-
-- Call Bento public catalog methods.
-- Keep only live, credit-based markets.
-- Return `duelId`; do not expose or accept the database `id` for actions.
-- Limit output to three results.
+New tool, not in the original contract. Covers duels across every lifecycle stage (not just live) for "what's upcoming/past" questions; still capped small because it's read aloud.
 
 ### `get_market_details`
 
@@ -252,7 +268,7 @@ Server behavior:
 type GetMarketDetailsInput = { duelId: string };
 ```
 
-Returns exact labels, status, current pricing data, close time, collateral mode, and the two valid option indexes.
+Returns exact labels, category, close time, collateral mode, and participant count for one `duelId`, which must come from `list_live_markets`/`list_all_duels`.
 
 ### `get_account_summary`
 
@@ -260,53 +276,67 @@ Returns exact labels, status, current pricing data, close time, collateral mode,
 type GetAccountSummaryInput = Record<string, never>;
 ```
 
-The server derives user identity from the verified call session. The model cannot supply a wallet or phone number.
+Identity is derived from the verified call session (`ctx.phone`); the model cannot supply a wallet or phone number. Returns `balanceCredits`.
 
 ### `prepare_prediction`
 
 ```ts
-type PreparePredictionInput = {
-  duelId: string;
-  optionIndex: 0 | 1;
-  stakeCredits: number;
-};
-
-type PendingPrediction = {
-  confirmationToken: string;
-  expiresAt: string;
-  spokenSummary: string;
-  marketQuestion: string;
-  outcomeLabel: string;
-  stakeCredits: number;
-  estimatedShares: string;
-};
+type PreparePredictionInput = { duelId: string; optionIndex: "0" | "1"; stakeCredits: number };
 ```
 
-Server behavior:
+Requires an authenticated session (`ctx.bearer` + `ctx.managedAddress`). Loads the market, calls Bento `estimateBuy` for a fresh quote, stashes it server-side keyed by phone (60s expiry, single active quote per caller — [`lib/agent/pending-bets.ts`](lib/agent/pending-bets.ts)), and returns only an opaque `confirmationToken` plus a spoken summary. Does not place anything yet.
 
-- Validate market, user, credits mode, balance, and stake boundaries.
-- Convert stake to Bento base units using the correct collateral decimals.
-- Call `estimateBuy` with a fixed MVP slippage tolerance.
-- Store quote fields server-side in a short-lived pending record.
-- Return only a confirmation summary and opaque token.
+### `confirm_prediction`
 
-### `commit_prediction`
+```ts
+type ConfirmPredictionInput = Record<string, never>; // no args — resolves the caller's own pending quote
+```
 
-This is an internal controller operation, not a freely callable LLM tool.
-
-It may run only when:
-
-- The call session is authenticated.
-- A pending prediction exists for the same call.
-- It has not expired or already been consumed.
-- The caller confirmed through the allowed confirmation path.
-- Market, outcome, stake, and quote are unchanged.
-
-It calls Bento `placeBet`, consumes the token exactly once, and starts reconciliation.
+**Directly callable by the model** (renamed/reshaped from the original controller-only `commit_prediction`). Takes the latest stashed quote for the caller, calls Bento `placeBetFromEstimate`, and consumes the quote exactly once — a second call with no new `prepare_prediction` fails with "couldn't find that pending prediction." The system prompt (§14) instructs the model to call this only after explicit caller confirmation; there is no separate controller layer re-checking that instruction server-side beyond the single-use quote.
 
 ### `get_positions`
 
-Uses the managed-account address returned by Bento login, not the signing-wallet address.
+```ts
+type GetPositionsInput = { duelId: string };
+```
+
+Per-market share counts (`option0`/`option1`) for the caller's managed account.
+
+### `get_all_positions`
+
+New tool, not in the original contract. Returns every open position across all markets in one call — stake, current value, and unrealized P&L per outcome — so "what have I bet on?" doesn't require the caller to name a market first.
+
+### `mint_testnet_credits`
+
+```ts
+type MintTestnetCreditsInput = Record<string, never>;
+```
+
+New tool. Calls the Bento testnet faucet (`sdk.public.autoMint.mint`) for the caller's managed account and reports credits minted. Explicitly framed to the model as free play money, not a production feature.
+
+### `prepare_create_duel` / `confirm_create_duel`
+
+```ts
+type PrepareCreateDuelInput = {
+  question: string;      // 10-180 chars
+  category: "Cricket" | "Football" | "Basketball" | "American Football" | "Tennis" | "Baseball" | "Hockey" | "Formula 1";
+  optionA: string; optionB: string; // must differ
+  description?: string;
+  startInMinutes: number;   // >= 31 (Bento pre-flight simulation requirement)
+  durationMinutes: number;  // >= 15
+};
+type ConfirmCreateDuelInput = { confirmationToken: string };
+```
+
+New capability, not in the original contract: a linked caller can publish a brand-new **public** duel by voice. `prepare_create_duel` validates the schedule ([`lib/duel-schedule.ts`](lib/duel-schedule.ts)) and stashes the draft (5-minute expiry — [`lib/agent/pending-duels.ts`](lib/agent/pending-duels.ts)); `confirm_create_duel` calls Bento `createDuel` and makes it visible to every player, not just the caller. The system prompt must never call `confirm_create_duel` on its own initiative.
+
+### `search_market_news`
+
+```ts
+type SearchMarketNewsInput = { query: string }; // 2-300 chars
+```
+
+New tool, not in the original contract. Calls the Anakin.io Search API ([`lib/anakin.ts`](lib/anakin.ts)) for cited, real-time web results (title/url/snippet/date), capped to the top 3. Used for context that affects a market's likely outcome — the model must still never present this as Bento market data or as guaranteed information (§14).
 
 ## 11. Confirmation state machine
 
@@ -335,48 +365,48 @@ RECONCILING
 
 The `COMMITTING` state is exactly-once from the application's perspective. Repeated caller speech or WebSocket retries must not create an additional Bento write.
 
+**As built:** exactly-once is enforced by `takeLatestQuote`/`takeDuel` deleting the stashed record on first read ([`lib/agent/pending-bets.ts`](lib/agent/pending-bets.ts), [`lib/agent/pending-duels.ts`](lib/agent/pending-duels.ts)), not by a separate `COMMITTING` lock state — a second `confirm_prediction` call simply finds nothing pending and returns an error instead of double-spending. There is no automated reconciliation poll yet; `placeBetFromQuote`'s response is reported to the caller directly as accepted/failed.
+
 ## 12. Technical architecture
 
 ```text
-Caller
-  │ PSTN
-  ▼
-Twilio Programmable Voice
-  │ <Connect><ConversationRelay>
-  │ transcript, DTMF, interruption, streamed text
-  ▼
-Node.js voice gateway (HTTPS + WSS)
-  ├── call-session state machine
-  ├── confirmation controller
-  ├── OpenAI conversation orchestrator
-  ├── Bento service wrapper
-  ├── encrypted user-session store
-  └── receipt/observability service
-         │                  │
-         ▼                  ▼
-   OpenAI API          Bento SDK/API
+Caller                              Browser (web onboarding, /duels, /agent-chat, /tester)
+  │ PSTN                                  │ HTTPS
+  ▼                                       ▼
+Twilio Programmable Voice          Next.js app (app/, app/api/*)
+  │ <Connect><ConversationRelay>          ├── onboarding + wallet-link flow
+  │ transcript, DTMF, interruption        ├── public duels board (browse/create)
+  ▼                                       ├── agent-chat + tester dev consoles
+Node.js voice gateway (server/voiceGateway.ts, Express + ws)
+  ├── caller → linked-session resolver (phone → managedAddress/bearer)
+  ├── LangGraph agent runtime (lib/agent/agent.ts, createReactAgent)
+  ├── pending-quote / pending-duel stores (in-memory, short-lived)
+  ├── Bento service wrapper (lib/bento.ts)
+  ├── encrypted user-session store (lib/user-links.ts, MongoDB)
+  └── SMS receipt via Twilio
+         │                  │                    │
+         ▼                  ▼                    ▼
+   OpenAI API          Bento SDK/API        Anakin.io Search API
                             │
                             ▼
                      Bento/BSC state
 ```
 
-### Recommended implementation path
+### Implementation path (as built)
 
-Use Twilio ConversationRelay for the hackathon voice transport. It provides speech-to-text, text-to-speech, interruption handling, and JSON WebSocket messages while the app streams text tokens back to the caller.
+Twilio ConversationRelay is the voice transport, terminated by the Express/`ws` gateway in [`server/voiceGateway.ts`](server/voiceGateway.ts) (run via `pnpm voice`, separate process from the Next.js app). Conversation and tool selection run through LangChain/LangGraph's `createReactAgent` over the OpenAI API ([`lib/agent/agent.ts`](lib/agent/agent.ts), tools from [`lib/agent/tools.ts`](lib/agent/tools.ts)), not a bespoke Responses/Realtime loop. The same agent graph backs `/agent-chat` for text-based debugging without a phone call.
 
-Use the OpenAI Responses API or Realtime text events behind the gateway for conversation and tool selection. Keep the selected model in an environment variable. The architecture must allow streaming partial text to Twilio to reduce perceived latency.
-
-### Server endpoints
+### Server endpoints (as built)
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /voice/incoming` | Return TwiML connecting the call to ConversationRelay. |
-| `WSS /voice/session` | Receive Twilio session, prompt, DTMF, and interruption events. |
-| `POST /voice/complete` | Receive call completion/status callback. |
-| `POST /auth/send-link` | Send a signed, expiring onboarding link. |
-| `GET /connect` | Render phone verification and wallet-connect UI. |
-| `POST /auth/bento` | Exchange wallet signature for Bento login/register session. |
-| `GET /health` | Report service and dependency readiness for the demo. |
+| Twilio webhook → `server/voiceGateway.ts` | HTTP handler returns TwiML connecting the call to ConversationRelay; `wss://` session handles setup/prompt/DTMF/interruption events. |
+| `POST /api/verify/start`, `POST /api/verify/check` | Send/verify the onboarding OTP (plain Twilio Voice call, not Twilio Verify — see §0). |
+| `POST /api/auth/link` | Exchange wallet signature for a Bento login/register session and persist the phone↔wallet link. |
+| `GET /api/credits` | Read the linked user's play-credit balance. |
+| `GET /api/duels`, `POST /api/duels` | Public duels board reads and duel creation from the browser. |
+| `POST /api/bets/prepare`, `POST /api/bets/confirm` | Web-side two-phase estimate/place flow, mirroring the voice tools. |
+| `/api/tester/*` (`login`, `markets`, `market`, `estimate`, `place`, `create-duel`, `duels`, `shares`, `faucet`, `chat`) | Dev-only console backing `/tester`, exercising the Bento SDK wrapper and agent directly. |
 
 ## 13. Bento integration requirements
 
@@ -392,6 +422,19 @@ Use the OpenAI Responses API or Realtime text events behind the gateway for conv
 - Always pass an idempotency key.
 - Treat a successful write response as accepted, then poll a read to confirm.
 - Handle Bento rate limiting using the supplied retry timing.
+
+**As built, resolved by inspecting the live SDK** (see [`lib/bento.ts`](lib/bento.ts)):
+
+- The Builder API key goes in header **`x-builder-api-key`** (not `x-api-key`; there is no `apiKey` config field) — `createBentoSdk({ baseUrl, headers: { "x-builder-api-key": key } })`.
+- The signed login message must be exactly `Bento.fun Login\nTimestamp: {ts}\nWallet: {address}` with `ts = String(Date.now())`.
+- `eoaLogin({ address, signature, timestamp })` returns `{ exists: false, eoaAddress }` (no throw) for a new wallet — branch on this and call `eoaRegister({ address, signature, timestamp, username })`, which returns `{ success, token, expiresIn: 604800, user }`.
+- The **managed-account address is `user.address`** (also the JWT's `address` claim), distinct from the signing `eoaAddress`; it's what transacts and holds balances — the app never asks for a per-bet wallet signature.
+- Reads are two calls: `sdk.public.listMarkets({ collateralStack: "credits", status, limit, sortBy, sortOrder })` and `sdk.public.getMarketById({ marketId: duelId })`; a "market" is a binary "duel" under `/public/duels/*` — option labels live at `row.options[]`, the question at `row.betString`, the id at `row.duelId` (not `row.id`).
+- Betting is two-phase: `estimateBuy({ duelId, optionIndex, betAmountUsdc, slippageBps })` returns a quote good for ~60s; `placeBetFromEstimate` only reads `shares_out`, `min_shares_out`, `quote_id`, `quote_timestamp` off it.
+- Credits→base-units conversion is `credits * 10^CREDITS_DECIMALS` (`creditsToWei`, decimals from `BENTO_CREDITS_DECIMALS`, default 18) — always pass `collateralMode: "credits"`, which also bypasses geo-restrictions.
+- `sdk.public.autoMint.mint({ userAddress })` is the testnet faucet; retry once on the transient "replacement fee too low" nonce race.
+- `sdk.user.createDuel(input, { requestId })` publishes a new public credits duel; Bento's pre-flight simulation requires `startTime` at least 31 minutes out.
+- `@langchain/langgraph` must be a direct `package.json` dependency — pnpm won't hoist the transitive copy, and `createReactAgent`'s import fails typecheck otherwise.
 
 Reference documentation:
 
@@ -418,10 +461,10 @@ Reference documentation:
 ### Tool-call safety
 
 - Read tools may use automatic tool choice.
-- `prepare_prediction` is allowed only after market, outcome, and stake are all explicit.
-- The model cannot call `commit_prediction` directly.
-- Tool arguments are validated with strict schemas and server-side allowlists.
-- OpenAI and Twilio receive only the minimum user data required for the call flow.
+- `prepare_prediction` / `prepare_create_duel` are allowed only after market/duel details, outcome, and stake (or schedule) are all explicit.
+- **As built:** `confirm_prediction` and `confirm_create_duel` *are* directly callable by the model (see §0 and §10) — the system prompt is the only thing telling it to wait for explicit caller confirmation first. The safety net is that each call consumes a single-use, short-lived, server-stashed quote/duel; without a matching `prepare_*` call immediately before it, the confirm tool has nothing to act on and returns an error.
+- Tool arguments are validated with strict schemas (Zod) and server-side allowlists.
+- OpenAI, Twilio, and Anakin receive only the minimum user data required for the call flow — `search_market_news` sends only the search query, never caller identity.
 
 Reference documentation:
 
@@ -431,7 +474,7 @@ Reference documentation:
 ## 15. Twilio integration requirements
 
 - Purchase or configure one Twilio Voice-capable number.
-- Use the Twilio Verify voice channel for onboarding OTP delivery; trial accounts can call only verified destination numbers.
+- ~~Use the Twilio Verify voice channel for onboarding OTP delivery~~ **As built:** use a plain outbound Twilio Voice call (`client.calls.create` with inline TwiML) from `TWILIO_CALLER_NUMBER`, reading a self-generated 6-digit code. Twilio Verify's voice channel (`channel: "call"`) was accepted by the API (`status: pending`) but silently dropped by an Indian carrier (Jio, Karnataka) with no error code — see §0. Trial accounts can still call only verified destination numbers, and play a trial preamble first.
 - Return `<Connect><ConversationRelay>` from the inbound voice webhook.
 - Use a public `wss://` endpoint.
 - Validate `X-Twilio-Signature` for HTTP and WebSocket initiation.
