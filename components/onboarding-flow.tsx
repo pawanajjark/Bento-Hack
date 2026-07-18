@@ -101,7 +101,7 @@ function PhoneStep({
 
       {error ? <p className="error-message" role="alert">{error}</p> : null}
 
-      <button className="primary-button" type="submit" disabled={phone.length !== 10 || isBusy}>
+      <button className="primary-button" type="submit" disabled={isBusy}>
         <span>{isBusy ? "Calling you" : "Call me with a code"}</span>
         {isBusy ? (
           <LoaderCircle className="spin" size={21} aria-hidden="true" />
@@ -332,7 +332,7 @@ function ReadyStep({
   const [balance, setBalance] = useState<number | null>(null);
   const [loadingCredits, setLoadingCredits] = useState(false);
   const [creditsError, setCreditsError] = useState("");
-  const hotlineNumber = process.env.NEXT_PUBLIC_HOTLINE_NUMBER;
+  const hotlineNumber = "+1 224 506 0785";
   const shortAddress = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
 
   useEffect(() => {
@@ -364,7 +364,6 @@ function ReadyStep({
   }
 
   async function copyNumber() {
-    if (!hotlineNumber) return;
     await navigator.clipboard.writeText(hotlineNumber.replace(/\s/g, ""));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
@@ -380,12 +379,12 @@ function ReadyStep({
         <p>Your phone and wallet are connected to your Bento play-credit account.</p>
       </div>
 
-      <button className="hotline-number" type="button" onClick={copyNumber} disabled={!hotlineNumber}>
+      <button className="hotline-number" type="button" onClick={copyNumber}>
         <span>
           <small>Bento Hotline</small>
-          <strong>{hotlineNumber ?? "Add your Twilio number"}</strong>
+          <strong>{hotlineNumber}</strong>
         </span>
-        {hotlineNumber ? (copied ? <Check size={22} /> : <Copy size={21} />) : null}
+        {copied ? <Check size={22} /> : <Copy size={21} />}
       </button>
 
       <div className="credits-card">
@@ -432,7 +431,18 @@ export function OnboardingFlow() {
 
   async function submitPhone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (phone.length !== 10) return;
+
+    // Read the real field value rather than trusting the mirrored React state:
+    // autofill/paste can populate the input without firing onChange.
+    const input = event.currentTarget.querySelector<HTMLInputElement>("#phone-number");
+    const value = (input?.value ?? phone).replace(/\D/g, "");
+    if (value !== phone) setPhone(value);
+
+    if (value.length !== 10) {
+      setPhoneError("Enter your 10-digit mobile number.");
+      return;
+    }
+
     setIsBusy(true);
     setPhoneError("");
 
@@ -440,7 +450,7 @@ export function OnboardingFlow() {
       const response = await fetch("/api/verify/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({ phone: value }),
       });
       const result = await response.json();
 
