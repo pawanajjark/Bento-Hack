@@ -445,7 +445,10 @@ export default function TesterPage() {
     <main className={styles.shell}>
       <header className={styles.header}>
         <h1>Bento SDK tester</h1>
-        <Link href="/duels">← Back to duels</Link>
+        <nav style={{ display: "flex", gap: 14 }}>
+          <Link href="/agent-chat">Agent chat →</Link>
+          <Link href="/duels">← Back to duels</Link>
+        </nav>
       </header>
 
       <SessionPanel session={session} setSession={setSession} />
