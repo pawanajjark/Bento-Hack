@@ -79,9 +79,9 @@ export const preparePredictionTool = new DynamicStructuredTool({
     }
     const outcomeLabel = optionIndex === "0" ? market.optionA : market.optionB;
     const estimatedShares = (stakeCredits / 0.5).toFixed(1); // Mock 50/50 odds
-    
+
     const spokenSummary = `You are placing ${stakeCredits} play credits on ${outcomeLabel}. This quote estimates ${estimatedShares} shares. Say 'confirm' or press 1 to place it.`;
-    
+
     return JSON.stringify({
       confirmationToken: "mock_token_123",
       expiresAt: new Date(Date.now() + 60000).toISOString(),
@@ -117,11 +117,11 @@ export const searchMarketNewsTool = new DynamicStructuredTool({
       if (!results.results || results.results.length === 0) {
         return "No recent news found for this topic.";
       }
-      
+
       const snippets = results.results.slice(0, 3).map((item: any, i: number) => {
         return `[${i + 1}] ${item.title}\\nSnippet: ${item.excerpt}\\nSource: ${item.source}`;
       }).join("\\n\\n");
-      
+
       return `Recent News for "${query}":\\n\\n${snippets}`;
     } catch (error: any) {
       return `Error searching news: ${error.message}`;
