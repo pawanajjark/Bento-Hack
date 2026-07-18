@@ -5,17 +5,53 @@ export function bentoLoginMessage(address: string, timestamp: string): string {
   return `Bento.fun Login\nTimestamp: ${timestamp}\nWallet: ${address}`;
 }
 
-function getBentoSdk() {
+function getBentoSdk(bearer?: string) {
   const baseUrl = process.env.BENTO_URL;
   if (!baseUrl) throw new Error("BENTO_NOT_CONFIGURED");
   const apiKey = process.env.BENTO_BUILDER_API_KEY;
 
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["x-builder-api-key"] = apiKey;
+  if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
+
+  const authHeaders: Record<string, string> = bearer ? { Authorization: `Bearer ${bearer}` } : {};
   return createBentoSdk({
     baseUrl,
-    ...(apiKey ? { headers: { "x-builder-api-key": apiKey } } : {}),
-    // Login/register are public routes; no wallet headers needed for them.
-    auth: walletAuthProvider(() => ({})),
+    headers,
+    auth: walletAuthProvider(() => authHeaders),
   });
+}
+
+/** Faucet amount the Bento testnet auto-mint grants per call. */
+export const FAUCET_CREDITS = 1000;
+
+export type MintResult = {
+  success: boolean;
+  message?: string;
+  creditsMinted: number;
+};
+
+/**
+ * Mint testnet USDC + credits to the managed account (Bento auto-mint faucet).
+ * Retries once on the transient "replacement fee too low" nonce race.
+ */
+export async function mintTestnetFunds(managedAddress: string, bearer?: string): Promise<MintResult> {
+  const sdk = getBentoSdk(bearer);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = (await sdk.public.autoMint.mint({ userAddress: managedAddress })) as Json;
+    if (r.success === true) {
+      const message = typeof r.message === "string" ? r.message : undefined;
+      const parsed = message?.match(/(\d+)\s*Credits/i);
+      return {
+        success: true,
+        message,
+        creditsMinted: parsed ? Number(parsed[1]) : FAUCET_CREDITS,
+      };
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+  return { success: false, creditsMinted: 0 };
 }
 
 export type BentoSession = {

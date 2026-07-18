@@ -655,6 +655,46 @@ a:focus-visible {
   color: var(--text);
 }
 
+.credits-card {
+  align-items: center;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-control);
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  margin: 22px 0 0;
+  padding: 16px 18px;
+}
+
+.credits-amount {
+  align-items: baseline;
+  color: var(--text);
+  display: inline-flex;
+  gap: 8px;
+}
+
+.credits-amount svg {
+  align-self: center;
+  color: var(--accent);
+}
+
+.credits-amount strong {
+  font-family: var(--font-display), sans-serif;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.credits-amount small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.credits-card .secondary-button {
+  flex-shrink: 0;
+  margin: 0;
+}
+
 .site-footer {
   align-items: center;
   border-top: 1px solid var(--border-soft);

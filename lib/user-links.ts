@@ -9,6 +9,9 @@ export type UserLink = {
   managedAddress?: string;
   bentoTokenEncrypted?: string;
   tokenExpiresAt?: Date;
+  // Cached credit balance. Accurate while minting is the only balance change;
+  // replace with an on-chain read once betting spends credits.
+  creditsBalance?: number;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -57,4 +60,15 @@ export async function linkWallet(
 export async function getUserByPhone(e164Phone: string): Promise<UserLink | null> {
   const db = await getDb();
   return db.collection<UserLink>(COLLECTION).findOne({ phoneHash: hashPhone(e164Phone) });
+}
+
+/** Increment the cached credit balance and return the new total. */
+export async function addCredits(e164Phone: string, amount: number): Promise<number> {
+  const db = await getDb();
+  const result = await db.collection<UserLink>(COLLECTION).findOneAndUpdate(
+    { phoneHash: hashPhone(e164Phone) },
+    { $inc: { creditsBalance: amount }, $set: { updatedAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  return result?.creditsBalance ?? 0;
 }

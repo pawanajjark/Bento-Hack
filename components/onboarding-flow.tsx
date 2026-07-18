@@ -6,6 +6,7 @@ import {
   Check,
   ChevronDown,
   CircleCheck,
+  Coins,
   Copy,
   LoaderCircle,
   LockKeyhole,
@@ -14,7 +15,7 @@ import {
   ShieldCheck,
   Wallet,
 } from "lucide-react";
-import { FormEvent, KeyboardEvent, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 
 type Step = "phone" | "code" | "wallet" | "ready";
 
@@ -328,8 +329,39 @@ function ReadyStep({
   onRestart: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [balance, setBalance] = useState<number | null>(null);
+  const [loadingCredits, setLoadingCredits] = useState(false);
+  const [creditsError, setCreditsError] = useState("");
   const hotlineNumber = process.env.NEXT_PUBLIC_HOTLINE_NUMBER;
   const shortAddress = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+
+  useEffect(() => {
+    fetch(`/api/credits?phone=${encodeURIComponent(phone)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && typeof data.balance === "number") setBalance(data.balance);
+      })
+      .catch(() => {});
+  }, [phone]);
+
+  async function loadCredits() {
+    setLoadingCredits(true);
+    setCreditsError("");
+    try {
+      const response = await fetch("/api/credits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Could not load credits.");
+      setBalance(result.balance);
+    } catch (reason) {
+      setCreditsError(reason instanceof Error ? reason.message : "Could not load credits.");
+    } finally {
+      setLoadingCredits(false);
+    }
+  }
 
   async function copyNumber() {
     if (!hotlineNumber) return;
@@ -355,6 +387,29 @@ function ReadyStep({
         </span>
         {hotlineNumber ? (copied ? <Check size={22} /> : <Copy size={21} />) : null}
       </button>
+
+      <div className="credits-card">
+        <span className="credits-amount">
+          <Coins size={20} aria-hidden="true" />
+          <strong>{balance === null ? "—" : balance.toLocaleString()}</strong>
+          <small>play credits</small>
+        </span>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={loadCredits}
+          disabled={loadingCredits}
+        >
+          {loadingCredits ? (
+            <LoaderCircle className="spin" size={17} />
+          ) : (
+            <Coins size={16} />
+          )}
+          {loadingCredits ? "Loading" : "Load 1,000 credits"}
+        </button>
+      </div>
+
+      {creditsError ? <p className="error-message" role="alert">{creditsError}</p> : null}
 
       <div className="linked-details">
         <span><PhoneCall size={16} /> +91 {phone.slice(0, 5)} {phone.slice(5)}</span>
