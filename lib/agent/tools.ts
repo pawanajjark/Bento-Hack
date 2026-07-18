@@ -46,6 +46,7 @@ export function createTools(ctx: AgentContext = {}) {
       limit: z.enum(["1", "2", "3"]).optional().default("3").describe("Max number of markets to return. Default is 3."),
     }),
     func: async ({ query, limit }) => {
+      console.log("[Tool] list_live_markets called with:", { query, limit });
       try {
         const markets = await listMarkets({ query, limit: parseInt(limit || "3", 10) });
         if (markets.length === 0) return JSON.stringify({ markets: [], note: "No live markets right now." });
@@ -72,6 +73,7 @@ export function createTools(ctx: AgentContext = {}) {
       duelId: z.string().describe("The unique duelId of the market."),
     }),
     func: async ({ duelId }) => {
+      console.log("[Tool] get_market_details called with:", { duelId });
       try {
         const market = await getMarket(duelId);
         if (!market) return JSON.stringify({ error: "Market not found or not live." });
@@ -96,6 +98,7 @@ export function createTools(ctx: AgentContext = {}) {
     description: "Gets the user's current account balance in play credits.",
     schema: z.object({}),
     func: async () => {
+      console.log("[Tool] get_account_summary called");
       if (!ctx.phone) {
         return JSON.stringify({ error: "I don't have a linked account for this caller yet." });
       }
@@ -122,6 +125,7 @@ export function createTools(ctx: AgentContext = {}) {
       stakeCredits: z.number().describe("The amount of play credits to stake (whole numbers only)."),
     }),
     func: async ({ duelId, optionIndex, stakeCredits }) => {
+      console.log("[Tool] prepare_prediction called with:", { duelId, optionIndex, stakeCredits });
       const session = requireSession(ctx);
       if ("error" in session) return JSON.stringify({ error: session.error });
 
@@ -164,6 +168,7 @@ export function createTools(ctx: AgentContext = {}) {
       confirmationToken: z.string().describe("The confirmationToken returned by prepare_prediction."),
     }),
     func: async ({ confirmationToken }) => {
+      console.log("[Tool] confirm_prediction called with:", { confirmationToken });
       const session = requireSession(ctx);
       if ("error" in session) return JSON.stringify({ error: session.error });
 
@@ -202,6 +207,7 @@ export function createTools(ctx: AgentContext = {}) {
       duelId: z.string().describe("The duelId of the market to check positions in."),
     }),
     func: async ({ duelId }) => {
+      console.log("[Tool] get_positions called with:", { duelId });
       const session = requireSession(ctx);
       if ("error" in session) return JSON.stringify({ error: session.error });
       try {
@@ -230,6 +236,7 @@ export function createTools(ctx: AgentContext = {}) {
       query: z.string().describe("The search query for news articles (e.g., 'Bitcoin', 'India T20 World Cup')."),
     }),
     func: async ({ query }) => {
+      console.log("[Tool] search_market_news called with:", { query });
       try {
         const results = await searchNews(query);
         if (!results.results || results.results.length === 0) {
@@ -250,7 +257,7 @@ export function createTools(ctx: AgentContext = {}) {
     },
   });
 
-  return [
+  const tools = [
     listLiveMarketsTool,
     getMarketDetailsTool,
     getAccountSummaryTool,
@@ -259,4 +266,16 @@ export function createTools(ctx: AgentContext = {}) {
     getPositionsTool,
     searchMarketNewsTool,
   ];
+
+  for (const tool of tools) {
+    const originalFunc = tool.func;
+    // @ts-ignore
+    tool.func = async (args: any) => {
+      const result = await originalFunc(args);
+      console.log(`[Tool] ${tool.name} returned:`, result);
+      return result;
+    };
+  }
+
+  return tools;
 }

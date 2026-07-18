@@ -29,8 +29,21 @@ export function getTwilioCaller() {
 }
 
 export function toIndianE164(phone: unknown) {
-  if (typeof phone !== "string" || !/^[6-9]\d{9}$/.test(phone)) return null;
-  return `+91${phone}`;
+  if (typeof phone !== "string") return null;
+  
+  // If it already looks like an E.164 number, return it directly
+  if (/^\+[1-9]\d{1,14}$/.test(phone)) return phone;
+  
+  // Strip non-digits in case it's formatted like (123) 456-7890
+  const digitsOnly = phone.replace(/\D/g, '');
+  
+  // If it's a 10 digit Indian number without country code
+  if (/^[6-9]\d{9}$/.test(digitsOnly)) return `+91${digitsOnly}`;
+  
+  // If it already has 91
+  if (/^91[6-9]\d{9}$/.test(digitsOnly)) return `+${digitsOnly}`;
+
+  return null;
 }
 
 export function verificationErrorResponse(error: unknown) {
