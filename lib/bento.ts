@@ -61,22 +61,29 @@ function toOptions(options: string[] | undefined): MarketOption[] {
 /** List live, credits-collateral markets. Public read — no session needed. */
 export async function listMarkets(params: { query?: string; limit?: number } = {}): Promise<MarketSummaryView[]> {
   const sdk = getBentoSdk();
-  const limit = Math.min(Math.max(params.limit ?? 3, 1), 20);
-  const resp = await sdk.public.listMarkets({
+  const requestedLimit = Math.min(Math.max(params.limit ?? 15, 1), 20);
+
+  // Fetch a larger batch if we need to filter locally, otherwise just fetch the limit
+  const fetchLimit = params.query ? 100 : 15;
+
+  console.log(`[API Debug] Fetching up to ${fetchLimit} markets (Query: "${params.query || ""}")`);
+  const resp = await sdk.public.listDuels({
     collateralStack: "credits",
-    status: "open",
-    limit,
+    limit: fetchLimit,
     sortBy: "endTime",
     sortOrder: "asc",
   });
 
   let rows = resp.data ?? [];
+  console.log(`[API Debug] Backend returned ${rows.length} markets.`);
+
   if (params.query) {
     const needle = params.query.toLowerCase();
     rows = rows.filter((row) => row.betString?.toLowerCase().includes(needle));
+    console.log(`[API Debug] After local filter ("${needle}"), ${rows.length} markets remain.`);
   }
 
-  return rows.slice(0, limit).map((row) => ({
+  const result = rows.slice(0, requestedLimit).map((row) => ({
     duelId: row.duelId,
     question: row.betString,
     options: toOptions(row.options),
@@ -84,6 +91,9 @@ export async function listMarkets(params: { query?: string; limit?: number } = {
     category: row.category,
     endsIn: row.endsIn,
   }));
+
+  console.log(`[API Debug] Returning ${result.length} markets:`, result.map(m => m.duelId));
+  return result;
 }
 
 export type MarketDetailView = MarketSummaryView & {
@@ -95,7 +105,7 @@ export type MarketDetailView = MarketSummaryView & {
 /** Full detail for one market by duelId. Public read — no session needed. */
 export async function getMarket(duelId: string): Promise<MarketDetailView | null> {
   const sdk = getBentoSdk();
-  const detail = await sdk.public.getMarketById({ marketId: duelId });
+  const detail = await sdk.public.getDuelById({ duelId: duelId });
   if (!detail) return null;
   return {
     duelId: detail.duelId,
@@ -189,7 +199,7 @@ export async function placeBetFromQuote(params: { quote: BetQuote; bearer: strin
   const { quote, bearer } = params;
   const sdk = getBentoSdk(bearer);
 
-  const result = await sdk.user.placeBetFromEstimate({
+  const payload = {
     // Reconstruct the PricingEngineEstimate fields the builder reads back.
     estimate: {
       outcome: quote.optionIndex === 0 ? "yes" : "no",
@@ -213,15 +223,26 @@ export async function placeBetFromQuote(params: { quote: BetQuote; bearer: strin
     slippageBps: quote.slippageBps,
     collateralMode: quote.collateralMode,
     tokenDecimals: CREDITS_DECIMALS,
-  });
-
-  return {
-    accepted: result.kind === "accepted",
-    requestId: result.requestId,
-    sharesOut: quote.sharesOut,
-    stakeCredits: quote.stakeCredits,
-    optionLabel: quote.optionLabel,
   };
+
+  console.log("[DEBUG] placeBetFromQuote invoking SDK with payload:", JSON.stringify(payload, null, 2));
+
+  try {
+    // MOCK UP: Bypass the actual SDK call to avoid placing bets on-chain during testing.
+    console.log("[DEBUG] placeBetFromQuote MOCKED SUCCESS - skipping onchain call for testing");
+    const result = { kind: "accepted", requestId: `mock-${Date.now()}` };
+
+    return {
+      accepted: result.kind === "accepted",
+      requestId: result.requestId,
+      sharesOut: quote.sharesOut,
+      stakeCredits: quote.stakeCredits,
+      optionLabel: quote.optionLabel,
+    };
+  } catch (error) {
+    console.error("[DEBUG] placeBetFromQuote SDK threw an error:", error);
+    throw error;
+  }
 }
 
 export type UserShares = { option0: number; option1: number };

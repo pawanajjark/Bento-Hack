@@ -6,8 +6,11 @@ import { BaseMessage } from "@langchain/core/messages";
 
 export function createAgent(ctx: AgentContext = {}) {
   const llm = new ChatOpenAI({
-    modelName: "gpt-4o-mini",
+    modelName: "gpt-5.6-luna",
     temperature: 0.2, // Low temperature for more deterministic, reliable outputs
+    modelKwargs: {
+      reasoning_effort: "none",
+    },
   });
 
   const agentExecutor = createReactAgent({

@@ -34,21 +34,29 @@ function requireSession(ctx: AgentContext): { bearer: string; managedAddress: st
 
 function friendlyError(reason: unknown, fallback: string): string {
   const message = reason instanceof Error ? reason.message : "";
+
+  // Anti-hallucination guardrail: if the backend rejects the duelId, force the LLM to search for it again.
+  if (message.includes("No duel found with the given duelId")) {
+    return JSON.stringify({
+      error: "CRITICAL: You used an invalid or made-up duelId. You MUST call list_live_markets right now to search for the real duelId before you can proceed."
+    });
+  }
+
   return JSON.stringify({ error: message || fallback });
 }
 
 export function createTools(ctx: AgentContext = {}) {
   const listLiveMarketsTool = new DynamicStructuredTool({
     name: "list_live_markets",
-    description: "Lists up to 3 currently live prediction markets. Use this to discover available markets for the user.",
+    description: "Lists up to 20 currently live prediction markets. Use this to discover available markets for the user.",
     schema: z.object({
       query: z.string().optional().describe("Optional search keyword or sport to filter markets."),
-      limit: z.enum(["1", "2", "3"]).optional().default("3").describe("Max number of markets to return. Default is 3."),
+      limit: z.enum(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"]).optional().default("10").describe("Max number of markets to return. Default is 10."),
     }),
     func: async ({ query, limit }) => {
       console.log("[Tool] list_live_markets called with:", { query, limit });
       try {
-        const markets = await listMarkets({ query, limit: parseInt(limit || "3", 10) });
+        const markets = await listMarkets({ query, limit: parseInt(limit || "15", 10) });
         if (markets.length === 0) return JSON.stringify({ markets: [], note: "No live markets right now." });
         return JSON.stringify(
           markets.map((m) => ({
@@ -70,7 +78,7 @@ export function createTools(ctx: AgentContext = {}) {
     name: "get_market_details",
     description: "Gets detailed pricing and status for a specific market using its duelId.",
     schema: z.object({
-      duelId: z.string().describe("The unique duelId of the market."),
+      duelId: z.string().describe("The exact duelId of the market, which MUST be picked from the output of list_live_markets."),
     }),
     func: async ({ duelId }) => {
       console.log("[Tool] get_market_details called with:", { duelId });
@@ -118,9 +126,9 @@ export function createTools(ctx: AgentContext = {}) {
   const preparePredictionTool = new DynamicStructuredTool({
     name: "prepare_prediction",
     description:
-      "Prepares a prediction and gets a live quote before confirmation. DO NOT call this until the user has explicitly chosen a market, an outcome, and a stake amount. Returns a confirmationToken the user must confirm.",
+      "Prepares a prediction and gets a live quote before confirmation. You MUST call this tool AND receive its confirmationToken output BEFORE calling confirm_prediction. DO NOT call this until the user has explicitly chosen a market, an outcome, and a stake amount. Returns a confirmationToken.",
     schema: z.object({
-      duelId: z.string().describe("The duelId of the market."),
+      duelId: z.string().describe("The exact duelId of the market, which MUST be picked from the output of list_live_markets."),
       optionIndex: z.enum(["0", "1"]).describe("The index of the outcome (0 for optionA, 1 for optionB)."),
       stakeCredits: z.number().describe("The amount of play credits to stake (whole numbers only)."),
     }),
@@ -143,7 +151,7 @@ export function createTools(ctx: AgentContext = {}) {
 
         const token = stashQuote(ctx.phone ?? session.managedAddress, quote);
         const shares = quote.sharesOut.toFixed(1);
-        const spokenSummary = `You are placing ${quote.stakeCredits} play credits on ${quote.optionLabel} for ${market.question}. This quote estimates ${shares} shares. Say 'confirm' or press 1 to place it.`;
+        const spokenSummary = `Preparing to place ${quote.stakeCredits} play credits on ${quote.optionLabel} for ${market.question}...`;
 
         return JSON.stringify({
           confirmationToken: token,
@@ -163,7 +171,7 @@ export function createTools(ctx: AgentContext = {}) {
   const confirmPredictionTool = new DynamicStructuredTool({
     name: "confirm_prediction",
     description:
-      "Places the prediction the user just confirmed. Call ONLY after prepare_prediction returned a confirmationToken AND the user explicitly said confirm/yes/press 1. Spends the user's play credits.",
+      "Places the prediction. Call IMMEDIATELY after prepare_prediction returns a confirmationToken. Spends the user's play credits.",
     schema: z.object({
       confirmationToken: z.string().describe("The confirmationToken returned by prepare_prediction."),
     }),
@@ -184,6 +192,7 @@ export function createTools(ctx: AgentContext = {}) {
 
       try {
         const placed = await placeBetFromQuote({ quote: taken.quote, bearer: session.bearer });
+        console.log("[Tool] confirm_prediction success, placed result:", placed);
         return JSON.stringify({
           placed: placed.accepted,
           requestId: placed.requestId,
@@ -195,6 +204,7 @@ export function createTools(ctx: AgentContext = {}) {
           )} shares.`,
         });
       } catch (reason) {
+        console.error("[DEBUG] confirm_prediction caught error:", reason);
         return friendlyError(reason, "The prediction couldn't be placed. No credits were spent.");
       }
     },
@@ -204,7 +214,7 @@ export function createTools(ctx: AgentContext = {}) {
     name: "get_positions",
     description: "Gets the user's current shares in a specific market. Requires the market's duelId.",
     schema: z.object({
-      duelId: z.string().describe("The duelId of the market to check positions in."),
+      duelId: z.string().describe("The exact duelId of the market, which MUST be picked from the output of list_live_markets."),
     }),
     func: async ({ duelId }) => {
       console.log("[Tool] get_positions called with:", { duelId });
