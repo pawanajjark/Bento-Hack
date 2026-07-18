@@ -3,7 +3,7 @@ import type { BetQuote } from "@/lib/bento";
 
 // In-memory pending-quote store bridging prepare_prediction -> confirm_prediction.
 // Fine for a single-process hackathon/dev server; move to Redis before scaling out.
-type Entry = { quote: BetQuote; phone: string; expiresAt: number };
+type Entry = { quote: BetQuote; phone: string; expiresAt: number; bearer?: string };
 
 const store = new Map<string, Entry>();
 const TTL_MS = 60 * 1000; // Quotes go stale fast; match the spoken "60 seconds".
@@ -15,15 +15,15 @@ function sweep() {
   }
 }
 
-export function stashQuote(phone: string, quote: BetQuote): string {
+export function stashQuote(phone: string, quote: BetQuote, bearer?: string): string {
   sweep();
   const token = randomBytes(16).toString("hex");
-  store.set(token, { quote, phone, expiresAt: Date.now() + TTL_MS });
+  store.set(token, { quote, phone, expiresAt: Date.now() + TTL_MS, bearer });
   return token;
 }
 
 export type TakeResult =
-  | { ok: true; quote: BetQuote }
+  | { ok: true; quote: BetQuote; bearer?: string }
   | { ok: false; reason: "not_found" | "expired" | "mismatch" };
 
 /**
@@ -36,5 +36,5 @@ export function takeQuote(phone: string, token: string): TakeResult {
   store.delete(token);
   if (Date.now() > entry.expiresAt) return { ok: false, reason: "expired" };
   if (entry.phone !== phone) return { ok: false, reason: "mismatch" };
-  return { ok: true, quote: entry.quote };
+  return { ok: true, quote: entry.quote, bearer: entry.bearer };
 }

@@ -1,4 +1,9 @@
-import { createBentoSdk, walletAuthProvider } from "@bento.fun/sdk";
+import {
+  createBentoSdk,
+  walletAuthProvider,
+  type ListMarketsRequest,
+  type PublicDuelSummary,
+} from "@bento.fun/sdk";
 
 /** The exact message a wallet must sign for Bento EOA login (see EoaLoginDto). */
 export function bentoLoginMessage(address: string, timestamp: string): string {
@@ -24,10 +29,10 @@ function getBentoSdk(bearer?: string) {
 
 /**
  * Decimals used to scale whole play credits into on-chain collateral "wei".
- * Credits markets settle in a USDC-style token (6 decimals by default);
+ * Bento test/play credits use 18 decimals on the current BSC deployment;
  * override with BENTO_CREDITS_DECIMALS if the deployment differs.
  */
-export const CREDITS_DECIMALS = Number(process.env.BENTO_CREDITS_DECIMALS ?? 6);
+export const CREDITS_DECIMALS = Number(process.env.BENTO_CREDITS_DECIMALS ?? 18);
 
 /** Convert a whole-credit stake into the collateral base-unit string the API expects. */
 export function creditsToWei(stakeCredits: number): string {
@@ -50,12 +55,46 @@ export type MarketSummaryView = {
   endsIn?: number;
 };
 
+export type DuelStatus = "bootstrapping" | "open" | "pending" | "settled" | "pending_contest";
+
+export type DuelSummaryView = MarketSummaryView & {
+  status: DuelStatus;
+  startTime?: number | null;
+  endTime?: number | null;
+  participants: number;
+  volume: number;
+  description?: string | null;
+};
+
 function toOptions(options: string[] | undefined): MarketOption[] {
   const labels = options ?? [];
   return [
     { index: 0 as const, label: labels[0] ?? "Option A" },
     { index: 1 as const, label: labels[1] ?? "Option B" },
   ];
+}
+
+function secondsUntilEnd(endTime: number | null | undefined, fallback?: number) {
+  if (typeof endTime !== "number" || !Number.isFinite(endTime)) return fallback;
+  const epochSeconds = endTime > 1_000_000_000_000 ? endTime / 1000 : endTime;
+  return Math.max(0, Math.floor(epochSeconds - Date.now() / 1000));
+}
+
+function toDuelSummary(row: PublicDuelSummary, status: DuelStatus): DuelSummaryView {
+  return {
+    duelId: row.duelId,
+    question: row.betString,
+    options: toOptions(row.options),
+    collateralMode: row.collateralMode ?? "credits",
+    category: row.category,
+    endsIn: secondsUntilEnd(row.endTime, row.endsIn),
+    status,
+    startTime: row.startTime,
+    endTime: row.endTime,
+    participants: row.uniqueParticipants ?? 0,
+    volume: row.totalBetAmountUsdc ?? row.totalBetAmountUSDC ?? row.totalBetAmount ?? 0,
+    description: row.description,
+  };
 }
 
 /** List live, credits-collateral markets. Public read — no session needed. */
@@ -84,6 +123,104 @@ export async function listMarkets(params: { query?: string; limit?: number } = {
     category: row.category,
     endsIn: row.endsIn,
   }));
+}
+
+/** Load every page of the public duel catalog across every user-facing state. */
+export async function listAllDuels(): Promise<DuelSummaryView[]> {
+  const sdk = getBentoSdk();
+  const statuses: Array<Exclude<DuelStatus, "bootstrapping">> = ["open", "pending", "pending_contest", "settled"];
+  const pageSize = 100;
+
+  async function listEveryPage(request: Omit<ListMarketsRequest, "page" | "limit">) {
+    const rows: PublicDuelSummary[] = [];
+
+    for (let page = 1; ; page += 1) {
+      const response = await sdk.public.listMarkets({ ...request, page, limit: pageSize });
+      const batch = response.data ?? [];
+      rows.push(...batch);
+
+      if (batch.length === 0 || response.pagination?.hasMore !== true) break;
+    }
+
+    return rows;
+  }
+
+  const responses = await Promise.allSettled(
+    [
+      ...statuses.map(async (status) => {
+        const rows = await listEveryPage({
+          collateralStack: "credits",
+          status,
+          sortBy: status === "open" ? "endTime" : "createdAt",
+          sortOrder: status === "open" ? "asc" : "desc",
+        });
+        return rows.map((row) => toDuelSummary(row, status));
+      }),
+      (async () => {
+        // Bento exposes bootstrapping markets as numeric status -1, but the
+        // public status filter enum has no bootstrapping value. Read the raw
+        // catalog and select those rows so new markets appear immediately.
+        const rows = await listEveryPage({
+          collateralStack: "credits",
+          sortBy: "createdAt",
+          sortOrder: "desc",
+        });
+        return rows
+          .filter((row) => row.status === -1)
+          .map((row) => toDuelSummary(row, "bootstrapping"));
+      })(),
+    ],
+  );
+
+  const byId = new Map<string, DuelSummaryView>();
+  for (const response of responses) {
+    if (response.status !== "fulfilled") continue;
+    for (const duel of response.value) byId.set(duel.duelId, duel);
+  }
+
+  if (byId.size === 0) {
+    const failure = responses.find((response) => response.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
+
+  return [...byId.values()];
+}
+
+export type CreateDuelInput = {
+  question: string;
+  category: string;
+  description?: string;
+  optionA: string;
+  optionB: string;
+  startTime: string;
+  endTime: string;
+};
+
+/** Submit an authenticated, public credits duel. Acceptance is not finality. */
+export async function createDuel(params: CreateDuelInput & { bearer: string }) {
+  const sdk = getBentoSdk(params.bearer);
+  const result = await sdk.user.createDuel(
+    {
+      question: params.question,
+      type: "prediction",
+      category: params.category,
+      description: params.description,
+      optionA: params.optionA,
+      optionB: params.optionB,
+      startTime: params.startTime,
+      endTime: params.endTime,
+      privacyAccess: "public",
+      collateralMode: "credits",
+      tags: ["bento-hotline"],
+    },
+    { requestId: crypto.randomUUID() },
+  );
+
+  return {
+    duelId: result.raw.duelId,
+    txHash: result.raw.txHash,
+    requestId: result.requestId,
+  };
 }
 
 export type MarketDetailView = MarketSummaryView & {
