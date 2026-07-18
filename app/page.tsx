@@ -13,6 +13,7 @@ export default function Home() {
         </a>
 
         <nav className="header-links" aria-label="Main navigation">
+          <a href="/duels">Duels</a>
           <a href="#how-it-works">How it works</a>
           <a href="#privacy">Privacy</a>
         </nav>
@@ -40,6 +41,7 @@ export default function Home() {
 
       <footer className="site-footer" id="how-it-works">
         <div>
+          <a href="/duels">Duels</a>
           <a href="#how-it-works">How it works</a>
           <a href="#privacy">Privacy</a>
         </div>

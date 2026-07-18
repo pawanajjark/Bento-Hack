@@ -3,13 +3,30 @@ import { z } from "zod";
 import { searchNews } from "duck-duck-scrape";
 import {
   listMarkets,
+  listAllDuels,
   getMarket,
   estimateBet,
   placeBetFromQuote,
   getUserShares,
+  mintTestnetFunds,
+  createDuel,
+  type CreateDuelInput,
 } from "@/lib/bento";
+import { validateDuelSchedule } from "@/lib/duel-schedule";
 import { getUserByPhone } from "@/lib/user-links";
 import { stashQuote, takeQuote } from "./pending-bets";
+import { stashDuel, takeDuel } from "./pending-duels";
+
+const DUEL_CATEGORIES = [
+  "Cricket",
+  "Football",
+  "Basketball",
+  "American Football",
+  "Tennis",
+  "Baseball",
+  "Hockey",
+  "Formula 1",
+] as const;
 
 /**
  * Identity of the caller the agent is acting for. Threaded in from the voice
@@ -97,6 +114,44 @@ export function createTools(ctx: AgentContext = {}) {
         });
       } catch (reason) {
         return friendlyError(reason, "I couldn't load that market.");
+      }
+    },
+  });
+
+  const listAllDuelsTool = new DynamicStructuredTool({
+    name: "list_all_duels",
+    description:
+      "Lists duels across every stage — bootstrapping, upcoming, live, in review, and settled — not just what's live right now. Use this when the caller asks about upcoming or past duels, or wants more than the live catalog from list_live_markets.",
+    schema: z.object({
+      status: z
+        .enum(["bootstrapping", "open", "pending", "pending_contest", "settled", "all"])
+        .optional()
+        .default("all")
+        .describe("Filter to one lifecycle stage. Default 'all'."),
+      limit: z.number().int().min(1).max(5).optional().default(3).describe("Max duels to return, since this is read aloud. Default 3."),
+    }),
+    func: async ({ status, limit }) => {
+      console.log("[Tool] list_all_duels called with:", { status, limit });
+      try {
+        const duels = await listAllDuels();
+        const filtered = status && status !== "all" ? duels.filter((d) => d.status === status) : duels;
+        const top = filtered.slice(0, limit ?? 3);
+        if (top.length === 0) {
+          return JSON.stringify({ duels: [], note: `No duels found${status && status !== "all" ? ` in status ${status}` : ""}.` });
+        }
+        return JSON.stringify(
+          top.map((d) => ({
+            duelId: d.duelId,
+            question: d.question,
+            status: d.status,
+            optionA: d.options[0].label,
+            optionB: d.options[1].label,
+            category: d.category,
+            participants: d.participants,
+          })),
+        );
+      } catch (reason) {
+        return friendlyError(reason, "I couldn't load the duel catalog right now.");
       }
     },
   });
@@ -238,6 +293,116 @@ export function createTools(ctx: AgentContext = {}) {
     },
   });
 
+  const mintTestnetCreditsTool = new DynamicStructuredTool({
+    name: "mint_testnet_credits",
+    description:
+      "Tops up the caller's play-credit balance from the testnet faucet. Use this when the caller is out of credits and wants more to keep playing. It's free play money, not real funds.",
+    schema: z.object({}),
+    func: async () => {
+      console.log("[Tool] mint_testnet_credits called");
+      const session = requireSession(ctx);
+      if ("error" in session) return JSON.stringify({ error: session.error });
+      try {
+        const result = await mintTestnetFunds(session.managedAddress, session.bearer);
+        if (!result.success) {
+          return JSON.stringify({ error: "The faucet didn't mint this time. Let's try again in a moment." });
+        }
+        return JSON.stringify({
+          minted: true,
+          creditsMinted: result.creditsMinted,
+          spokenSummary: `Boom, ${result.creditsMinted} fresh play credits just landed in your account.`,
+        });
+      } catch (reason) {
+        return friendlyError(reason, "I couldn't reach the faucet right now.");
+      }
+    },
+  });
+
+  const prepareCreateDuelTool = new DynamicStructuredTool({
+    name: "prepare_create_duel",
+    description:
+      "Stages a brand-new public duel for the caller to publish. Call this only after the caller has given you a clear question, a category, and two distinct outcome labels. Does NOT publish yet — returns a confirmationToken and a spoken summary the caller must confirm before it goes live.",
+    schema: z.object({
+      question: z.string().min(10).max(180).describe("The prediction question, phrased clearly, 10-180 characters."),
+      category: z.enum(DUEL_CATEGORIES).describe("The sport or category this duel belongs to."),
+      optionA: z.string().max(50).describe("Label for outcome A, e.g. 'Yes' or a team name."),
+      optionB: z.string().max(50).describe("Label for outcome B, distinct from optionA."),
+      description: z.string().max(400).optional().describe("Optional note on how the result will be decided."),
+      startInMinutes: z.number().int().min(31).describe("Minutes from now until betting opens. Bento requires at least 31."),
+      durationMinutes: z.number().int().min(15).describe("How many minutes the duel stays open once it starts. Bento requires at least 15."),
+    }),
+    func: async ({ question, category, optionA, optionB, description, startInMinutes, durationMinutes }) => {
+      console.log("[Tool] prepare_create_duel called with:", { question, category, optionA, optionB, startInMinutes, durationMinutes });
+      const session = requireSession(ctx);
+      if ("error" in session) return JSON.stringify({ error: session.error });
+      if (optionA.trim().toLowerCase() === optionB.trim().toLowerCase()) {
+        return JSON.stringify({ error: "The two outcomes need to be different." });
+      }
+
+      const startDate = new Date(Date.now() + startInMinutes * 60_000);
+      const endDate = new Date(startDate.valueOf() + durationMinutes * 60_000);
+      const schedule = validateDuelSchedule(startDate.toISOString(), endDate.toISOString());
+      if (!schedule.valid) return JSON.stringify({ error: schedule.error });
+
+      const input: CreateDuelInput = {
+        question,
+        category,
+        optionA,
+        optionB,
+        description,
+        startTime: schedule.startDate.toISOString(),
+        endTime: schedule.endDate.toISOString(),
+      };
+      const token = stashDuel(ctx.phone ?? session.managedAddress, input);
+      const spokenSummary = `New duel: ${question} Outcomes are ${optionA} or ${optionB}, opening in about ${startInMinutes} minutes and running for ${durationMinutes} minutes. This goes public for everyone to play. Say confirm to publish it.`;
+
+      return JSON.stringify({
+        confirmationToken: token,
+        expiresInSeconds: 300,
+        spokenSummary,
+        question,
+        optionA,
+        optionB,
+        category,
+      });
+    },
+  });
+
+  const confirmCreateDuelTool = new DynamicStructuredTool({
+    name: "confirm_create_duel",
+    description:
+      "Publishes the duel staged by prepare_create_duel. Call ONLY after the caller explicitly confirms. This makes the duel public and visible to every player — never call it on your own initiative.",
+    schema: z.object({
+      confirmationToken: z.string().describe("The confirmationToken returned by prepare_create_duel."),
+    }),
+    func: async ({ confirmationToken }) => {
+      console.log("[Tool] confirm_create_duel called with:", { confirmationToken });
+      const session = requireSession(ctx);
+      if ("error" in session) return JSON.stringify({ error: session.error });
+
+      const scope = ctx.phone ?? session.managedAddress;
+      const taken = takeDuel(scope, confirmationToken);
+      if (!taken.ok) {
+        const message =
+          taken.reason === "expired"
+            ? "That duel setup expired. Let's set it up again."
+            : "I couldn't find that pending duel. Let's set it up again.";
+        return JSON.stringify({ error: message });
+      }
+
+      try {
+        const result = await createDuel({ ...taken.input, bearer: session.bearer });
+        return JSON.stringify({
+          published: true,
+          duelId: result.duelId,
+          spokenSummary: `It's live. Your duel is published, and the ID ends in ${result.duelId.slice(-6)}.`,
+        });
+      } catch (reason) {
+        return friendlyError(reason, "The duel couldn't be published. Nothing went out.");
+      }
+    },
+  });
+
   const searchMarketNewsTool = new DynamicStructuredTool({
     name: "search_market_news",
     description:
@@ -269,11 +434,15 @@ export function createTools(ctx: AgentContext = {}) {
 
   const tools = [
     listLiveMarketsTool,
+    listAllDuelsTool,
     getMarketDetailsTool,
     getAccountSummaryTool,
     preparePredictionTool,
     confirmPredictionTool,
     getPositionsTool,
+    mintTestnetCreditsTool,
+    prepareCreateDuelTool,
+    confirmCreateDuelTool,
     searchMarketNewsTool,
   ];
 
